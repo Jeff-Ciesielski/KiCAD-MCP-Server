@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import sexpdata
+from commands.bus_connectivity import parse_sheet_geometry
 from commands.pin_locator import PinLocator
 from commands.wire_connectivity import _parse_virtual_connections, _to_iu
 from commands.wire_dragger import WireDragger
@@ -875,7 +876,7 @@ def find_orphaned_wires(schematic_path: Path) -> Dict[str, Any]:
     all three conditions simultaneously:
       1. No other wire shares that IU endpoint (would imply a junction / T-join)
       2. No component pin is at that IU point
-      3. No net label or power symbol pin is at that IU point
+      3. No net label, power symbol pin or bus entry end is at that IU point
 
     Uses exact KiCad IU matching (10 000 IU/mm) — same strategy as
     wire_connectivity.py — to avoid floating-point tolerance issues.
@@ -947,7 +948,12 @@ def find_orphaned_wires(schematic_path: Path) -> Dict[str, Any]:
         except Exception as e:
             logger.warning(f"Could not extract power symbol anchors: {e}")
 
-    anchored_iu = pin_iu | label_iu | power_iu
+    # --- anchors: the wire end of each bus entry ---
+    entry_iu: Set[Tuple[int, int]] = {
+        entry.wire_end for entry in parse_sheet_geometry(sexp_data).entries
+    }
+
+    anchored_iu = pin_iu | label_iu | power_iu | entry_iu
 
     # --- classify each wire ---
     orphaned: List[Dict[str, Any]] = []

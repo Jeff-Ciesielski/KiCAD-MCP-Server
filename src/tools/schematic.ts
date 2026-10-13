@@ -598,10 +598,14 @@ edit_schematic_component and set its value to an empty string.`,
       "Alternatively supply position [x, y], but the coordinates must match the pin endpoint exactly " +
       "(even a 0.01 mm offset breaks the connection). " +
       "The response includes actual_position (coordinates actually used) and snapped_to_pin " +
-      "(present when a pin reference was resolved).",
+      "(present when a pin reference was resolved). " +
+      "To label a bus, use bus label text (e.g. 'D[0..7]' or 'I2C{SDA SCL}') and a position " +
+      "on the bus.",
     {
       schematicPath: z.string().describe("Path to the schematic file"),
-      netName: z.string().describe("Name of the net (e.g., VCC, GND, SIGNAL_1)"),
+      netName: z
+        .string()
+        .describe("Name of the net (e.g., VCC, GND, SIGNAL_1), or bus label text such as D[0..7]"),
       position: z
         .array(z.number())
         .length(2)
@@ -755,25 +759,40 @@ edit_schematic_component and set its value to an empty string.`,
   // Get net connections
   server.tool(
     "get_net_connections",
-    "Get all connections for a named net",
+    "Get all pins on a net across the whole hierarchy. The net is KiCad's own, from " +
+      "kicad-cli's netlist, so pins joined through sheet pins, bus sheet pins and global labels " +
+      "are included. netName can be any label on the net or KiCad's net name (e.g. /ADDR0). " +
+      "'nets' gives KiCad's net name; a label used on several separate nets (e.g. EN on each " +
+      "copy of a sub-sheet) lists all of them with a warning. Given a bus label such as " +
+      "'D[0..7]' or 'I2C{SDA SCL}', it lists the pins of every member. Without kicad-cli, pins " +
+      "are matched by label name only and a warning says so.",
     {
       schematicPath: z.string().describe("Path to the schematic file"),
-      netName: z.string().describe("Name of the net to query"),
+      netName: z.string().describe("Name of the net, or a bus label, to query"),
     },
     async (args: { schematicPath: string; netName: string }) => {
       const result = await callKicadScript("get_net_connections", args);
       if (result.success && result.connections) {
-        const connectionList = result.connections
-          .map((conn: any) => `  - ${conn.component}/${conn.pin}`)
-          .join("\n");
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Net '${args.netName}' connections:\n${connectionList}`,
-            },
-          ],
-        };
+        const pins = (conns: any[]) =>
+          conns.map((conn: any) => `  - ${conn.component}/${conn.pin}`).join("\n");
+        let text: string;
+        if (result.bus) {
+          const members = result.bus.members
+            .map((m: string) => {
+              const conns = result.memberConnections?.[m] || [];
+              const list = conns.map((c: any) => `${c.component}/${c.pin}`).join(", ");
+              return `  ${m}: ${list || "(no connections)"}`;
+            })
+            .join("\n");
+          text = `Bus '${args.netName}' (${result.bus.kind}) members:\n${members}`;
+        } else {
+          const kicadName = result.nets?.length ? ` (KiCad net ${result.nets.join(", ")})` : "";
+          text = `Net '${args.netName}'${kicadName} connections:\n${pins(result.connections)}`;
+        }
+        if (result.warnings?.length) {
+          text += `\nWarnings:\n${result.warnings.map((w: string) => `  - ${w}`).join("\n")}`;
+        }
+        return { content: [{ type: "text", text }] };
       } else {
         return {
           content: [
@@ -992,7 +1011,11 @@ edit_schematic_component and set its value to an empty string.`,
   // List all nets in schematic
   server.tool(
     "list_schematic_nets",
-    "List all nets in the schematic with their connections.",
+    "List all nets in the schematic hierarchy with their connections. Nets come from " +
+      "kicad-cli's netlist under KiCad's names (e.g. /ADDR0, /child/A0, GND), so sheet pins, " +
+      "bus sheet pins and reused sheets follow KiCad exactly; each net lists the labels on it. " +
+      "A bus label is not a net: buses and their members are listed separately. Without " +
+      "kicad-cli, nets are matched by label name only and a warning says so.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
     },
@@ -1009,16 +1032,23 @@ edit_schematic_component and set its value to an empty string.`,
           const conns = (n.connections || []).map((c: any) => `${c.component}/${c.pin}`).join(", ");
           const pinCount =
             n.connected_pin_count !== undefined ? ` [${n.connected_pin_count} pin(s)]` : "";
-          return `  ${n.name}${pinCount}: ${conns || "(no connections)"}`;
+          const labels =
+            n.labels?.length && !(n.labels.length === 1 && n.labels[0] === n.name)
+              ? ` (labels: ${n.labels.join(", ")})`
+              : "";
+          return `  ${n.name}${labels}${pinCount}: ${conns || "(no connections)"}`;
         });
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Nets (${nets.length}):\n${lines.join("\n")}`,
-            },
-          ],
-        };
+        let text = `Nets (${nets.length}):\n${lines.join("\n")}`;
+        if (result.buses?.length) {
+          const busLines = result.buses.map(
+            (b: any) => `  ${b.name} (${b.kind}): ${b.members.join(", ")}`,
+          );
+          text += `\n\nBuses (${result.buses.length}):\n${busLines.join("\n")}`;
+        }
+        if (result.warnings?.length) {
+          text += `\n\nWarnings:\n${result.warnings.map((w: string) => `  - ${w}`).join("\n")}`;
+        }
+        return { content: [{ type: "text", text }] };
       }
       return {
         content: [
@@ -1648,7 +1678,10 @@ edit_schematic_component and set its value to an empty string.`,
   // Sync schematic to PCB board (equivalent to KiCAD F8 / "Update PCB from Schematic")
   server.tool(
     "sync_schematic_to_board",
-    "Import the schematic netlist into the PCB board — equivalent to pressing F8 in KiCAD (Tools → Update PCB from Schematic). MUST be called after the schematic is complete and before placing or routing components on the PCB. Without this step, the board has no footprints and no net assignments — place_component and route_pad_to_pad will produce an empty, unroutable board.",
+    "Import the schematic netlist into the PCB board — equivalent to pressing F8 in KiCAD (Tools → Update PCB from Schematic). MUST be called after the schematic is complete and before placing or routing components on the PCB. Without this step, the board has no footprints and no net assignments — place_component and route_pad_to_pad will produce an empty, unroutable board. " +
+      "Pad nets come from kicad-cli's netlist, with KiCad's net names (e.g. /ADDR0), so " +
+      "sheet pins, buses and reused sheets match what KiCad's own F8 gives. Without " +
+      "kicad-cli, nets are matched by label name and the response warns.",
     {
       schematicPath: z.string().describe("Absolute path to the .kicad_sch schematic file"),
       boardPath: z.string().describe("Absolute path to the .kicad_pcb board file"),
@@ -1908,6 +1941,7 @@ edit_schematic_component and set its value to an empty string.`,
     "Returns all net labels in the schematic that are not connected to any component pin. " +
       "A label is 'floating' when no component pin falls on the wire-network reachable from the " +
       "label's position. Floating labels indicate misplaced or off-grid labels that cause ERC errors. " +
+      "A bus label (e.g. 'D[0..7]') is floating, with type bus_label, when no bus passes through it. " +
       "Does not require the KiCAD UI to be running.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch schematic file"),
@@ -2051,7 +2085,8 @@ edit_schematic_component and set its value to an empty string.`,
   server.tool(
     "get_net_at_point",
     "Returns the net name at a given (x, y) coordinate in a schematic, or null if no net label " +
-      "or wire endpoint is present at that position. Faster than get_pin_net when you only need " +
+      "or wire endpoint is present at that position. A point on a bus returns the bus label with " +
+      "source 'bus' and the bus members. Faster than get_pin_net when you only need " +
       "the net name at a known coordinate and don't need pin traversal.",
     {
       schematicPath: z.string().describe("Path to the schematic file (.kicad_sch)"),
@@ -2071,7 +2106,8 @@ edit_schematic_component and set its value to an empty string.`,
               text:
                 `Net at (${pos?.x ?? args.x}, ${pos?.y ?? args.y}): ` +
                 (netName !== null ? netName : "(none)") +
-                (source ? ` [source: ${source}]` : ""),
+                (source ? ` [source: ${source}]` : "") +
+                (result.bus ? ` [bus ${result.bus.kind}: ${result.bus.members.join(", ")}]` : ""),
             },
           ],
         };
@@ -2094,7 +2130,8 @@ edit_schematic_component and set its value to an empty string.`,
     "Add a hierarchical label (sheet interface port) to a sub-sheet schematic. " +
       "Hierarchical labels are the connection points that link a sub-sheet to its " +
       "parent via sheet pins. The label text must exactly match the corresponding " +
-      "sheet pin name.",
+      "sheet pin name. For a bus port use bus label text such as 'A[0..7]' or 'I2C{SDA SCL}' " +
+      "and place the label on a bus.",
     {
       schematicPath: z.string().describe("Path to the sub-sheet .kicad_sch file"),
       text: z.string().describe("Label text (e.g. 'SD_CLK') — must match the sheet pin name"),
@@ -2249,7 +2286,10 @@ edit_schematic_component and set its value to an empty string.`,
     "add_sheet_pin",
     "Add a pin to a sheet symbol block on the parent schematic. Sheet pins are the " +
       "parent-side connection points that correspond to hierarchical labels in the " +
-      "sub-sheet. The pinName must exactly match a hierarchical_label in the sub-sheet.",
+      "sub-sheet. The pinName must exactly match a hierarchical_label in the sub-sheet. " +
+      "A bus pin uses bus label text such as 'A[0..7]': the parent bus reaching the pin must " +
+      "carry a bus label, and KiCad joins vector members by position (ADDR[4..7] to A[0..3] " +
+      "joins ADDR4 with A0) and group members by member name.",
     {
       schematicPath: z.string().describe("Path to the PARENT .kicad_sch file"),
       sheetName: z

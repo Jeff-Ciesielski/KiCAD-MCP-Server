@@ -30,6 +30,7 @@ if sys.platform == "win32":
 
 import sexpdata
 from annotations import AnnotationLoader
+from commands.schematic_bus_handlers import SchematicBusHandlersMixin
 from commands.schematic_handlers import SchematicHandlersMixin
 from commands.wire_manager import WireManager
 from resources.resource_definitions import RESOURCE_DEFINITIONS, handle_resource_read
@@ -440,7 +441,7 @@ except ImportError as e:
     sys.exit(1)
 
 
-class KiCADInterface(SchematicHandlersMixin):
+class KiCADInterface(SchematicHandlersMixin, SchematicBusHandlersMixin):
     """Main interface class to handle KiCAD operations"""
 
     def __init__(self) -> None:
@@ -696,6 +697,16 @@ class KiCADInterface(SchematicHandlersMixin):
             "get_schematic_component": self._handle_get_schematic_component,
             "add_schematic_wire": self._handle_add_schematic_wire,
             "add_schematic_net_label": self._handle_add_schematic_net_label,
+            # Bus commands
+            "add_schematic_bus": self._handle_add_schematic_bus,
+            "delete_schematic_bus": self._handle_delete_schematic_bus,
+            "add_schematic_bus_entry": self._handle_add_schematic_bus_entry,
+            "delete_schematic_bus_entry": self._handle_delete_schematic_bus_entry,
+            "list_schematic_buses": self._handle_list_schematic_buses,
+            "connect_pins_to_bus": self._handle_connect_pins_to_bus,
+            "list_bus_aliases": self._handle_list_bus_aliases,
+            "set_bus_alias": self._handle_set_bus_alias,
+            "delete_bus_alias": self._handle_delete_bus_alias,
             "add_no_connect": self._handle_add_no_connect,
             "connect_to_net": self._handle_connect_to_net,
             "connect_passthrough": self._handle_connect_passthrough,
@@ -2888,24 +2899,89 @@ class KiCADInterface(SchematicHandlersMixin):
         return False
 
     def _handle_get_net_connections(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get all connections for a named net"""
+        """Get all connections for a named net, or for each member of a bus label.
+
+        KiCad's netlist decides what the net is, so pins joined through sheet
+        pins, bus pins and global labels are included. Without kicad-cli the
+        pins are matched by label name only.
+        """
         logger.info("Getting net connections")
         try:
-            from commands.wire_connectivity import get_connections_for_net
+            from commands.bus_connectivity import design_aliases, try_parse_bus_label
+            from commands.design_netlist import (
+                DesignNetlist,
+                export_design_netlist,
+                label_nets,
+                label_pins,
+            )
+            from commands.wire_connectivity import get_connections_for_nets
 
             schematic_path = params.get("schematicPath")
             net_name = params.get("netName")
 
-            if not all([schematic_path, net_name]):
+            if not schematic_path or not net_name:
                 return {"success": False, "message": "Missing required parameters"}
+            net_name = str(net_name)
 
             try:
                 schematic = SchematicManager.load_schematic(schematic_path)
             except SchematicLoadError as e:
                 return e.to_response()
 
-            connections = get_connections_for_net(schematic, schematic_path, net_name)
-            return {"success": True, "connections": connections}
+            aliases, problems = design_aliases(schematic_path)
+            bus = try_parse_bus_label(net_name, aliases)
+            members = list(bus.members) if bus is not None else [net_name]
+
+            netlist = export_design_netlist(schematic_path)
+            member_nets: Dict[str, List[str]] = {}
+            member_pins: Dict[str, List[Dict[str, str]]] = {}
+            if isinstance(netlist, DesignNetlist):
+                member_nets = label_nets(
+                    schematic_path, netlist, label_pins(schematic, schematic_path, members)
+                )
+                for member, kicad_nets in member_nets.items():
+                    member_pins[member] = [
+                        {"component": ref, "pin": pin}
+                        for kicad_net in kicad_nets
+                        for ref, pin in netlist.nets[kicad_net]
+                    ]
+                source = "kicad-cli"
+            else:
+                member_pins = get_connections_for_nets(
+                    schematic, schematic_path, members, aliases=aliases
+                )
+                problems.insert(
+                    0,
+                    f"KiCad netlist unavailable ({netlist}); pins are matched by label name "
+                    "and sheet pins that rename a net are not followed",
+                )
+                source = "labels"
+
+            result: Dict[str, Any] = {"success": True, "connectivitySource": source}
+            if bus is not None:
+                union: List[Dict[str, str]] = []
+                for pins in member_pins.values():
+                    for pin in pins:
+                        if pin not in union:
+                            union.append(pin)
+                result["connections"] = union
+                result["bus"] = {"name": net_name, "kind": bus.kind, "members": members}
+                result["memberConnections"] = member_pins
+                if member_nets:
+                    result["memberNets"] = member_nets
+            else:
+                result["connections"] = member_pins[net_name]
+                if source == "kicad-cli":
+                    kicad_nets = member_nets[net_name]
+                    result["nets"] = kicad_nets
+                    if len(kicad_nets) > 1:
+                        problems.append(
+                            f"'{net_name}' names {len(kicad_nets)} separate nets in KiCad "
+                            f"({', '.join(kicad_nets)}); connections lists the pins of all of them"
+                        )
+            if problems:
+                result["warnings"] = problems
+            return result
         except Exception as e:
             logger.error(f"Error getting net connections: {str(e)}")
             return {"success": False, "message": str(e)}

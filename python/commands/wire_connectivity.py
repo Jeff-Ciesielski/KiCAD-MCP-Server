@@ -14,9 +14,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import sexpdata
+from commands.bus_connectivity import (
+    bus_label_at,
+    try_parse_bus_label,
+    on_segment,
+    parse_sheet_geometry,
+)
 from commands.pin_locator import PinLocator
 from commands.wire_dragger import WireDragger
 from sexpdata import Symbol
+from utils.bus_aliases import design_bus_aliases, find_project_file
 
 logger = logging.getLogger("kicad_interface")
 
@@ -670,7 +677,8 @@ def list_floating_labels(schematic: Any, schematic_path: str) -> List[Dict[str, 
       - "name": str   — the net label text
       - "x": float    — label X position in mm
       - "y": float    — label Y position in mm
-      - "type": str   — "label" or "global_label"
+      - "type": str   — "label", or "bus_label" for a bus label that no bus
+        segment passes through
     """
     all_wires = _parse_wires(schematic)
     if all_wires:
@@ -705,6 +713,16 @@ def list_floating_labels(schematic: Any, schematic_path: str) -> List[Dict[str, 
     if not hasattr(schematic, "label"):
         return floating
 
+    # A bus label connects to a bus, not to pins: it is floating only when no
+    # bus segment passes through its anchor.
+    try:
+        sexp = _load_sexp(schematic_path)
+        bus_segments = parse_sheet_geometry(sexp).buses
+        aliases = design_bus_aliases(find_project_file(Path(schematic_path)), [sexp])
+    except (OSError, ValueError) as e:
+        logger.debug(f"Could not read buses from {schematic_path} ({e}); assuming none")
+        bus_segments, aliases = [], {}
+
     for label in schematic.label:
         try:
             if not hasattr(label, "value"):
@@ -716,6 +734,11 @@ def list_floating_labels(schematic: Any, schematic_path: str) -> List[Dict[str, 
             lx_mm = float(coords[0])
             ly_mm = float(coords[1])
             label_iu = _to_iu(lx_mm, ly_mm)
+
+            if try_parse_bus_label(name, aliases) is not None:
+                if not any(on_segment(label_iu, seg) for seg in bus_segments):
+                    floating.append({"name": name, "x": lx_mm, "y": ly_mm, "type": "bus_label"})
+                continue
 
             # Check if the label anchor itself is a pin position
             if label_iu in pin_iu_set:
@@ -755,7 +778,9 @@ def get_net_at_point(
     wire endpoints. Returns a dict with keys:
       - "net_name": str or None
       - "position": {"x": float, "y": float}
-      - "source": "net_label" | "wire_endpoint" | None
+      - "source": "net_label" | "wire_endpoint" | "bus" | None
+      - "bus": {"kind", "members"}, only when the name is a bus label. A point
+        on a bus segment reports the bus's label with source "bus".
     """
     query_iu = _to_iu(x_mm, y_mm)
     position = {"x": x_mm, "y": y_mm}
@@ -766,7 +791,15 @@ def get_net_at_point(
     # Check if query point is exactly on a net label / power symbol position
     label_name = point_to_label.get(query_iu)
     if label_name is not None:
-        return {"net_name": label_name, "position": position, "source": "net_label"}
+        try:
+            aliases = design_bus_aliases(
+                find_project_file(Path(schematic_path)), [_load_sexp(schematic_path)]
+            )
+        except (OSError, ValueError):
+            aliases = {}
+        return _with_bus_info(
+            {"net_name": label_name, "position": position, "source": "net_label"}, aliases
+        )
 
     # Check if query point is on a wire endpoint
     all_wires = _parse_wires(schematic) if hasattr(schematic, "wire") else []
@@ -792,7 +825,29 @@ def get_net_at_point(
                             break
                 return {"net_name": net, "position": position, "source": "wire_endpoint"}
 
+    try:
+        sexp = _load_sexp(schematic_path)
+    except (OSError, ValueError):
+        return {"net_name": None, "position": position, "source": None}
+    try:
+        aliases = design_bus_aliases(find_project_file(Path(schematic_path)), [sexp])
+    except ValueError:
+        aliases = design_bus_aliases(None, [sexp])
+    bus_label = bus_label_at(parse_sheet_geometry(sexp), query_iu, aliases)
+    if bus_label is not None:
+        return _with_bus_info(
+            {"net_name": bus_label.name, "position": position, "source": "bus"}, aliases
+        )
     return {"net_name": None, "position": position, "source": None}
+
+
+def _with_bus_info(result: Dict[str, Any], aliases: Dict[str, List[str]]) -> Dict[str, Any]:
+    """Add the members of result["net_name"] when that name is a bus label."""
+    name = result.get("net_name")
+    bus = try_parse_bus_label(name, aliases) if name else None
+    if bus is not None:
+        result["bus"] = {"kind": bus.kind, "members": list(bus.members)}
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1061,17 +1116,26 @@ def _process_single_sheet(
     return _process_single_sheet_nets(schematic, schematic_path, [net_name])[net_name]
 
 
+def query_names(net_name: str, aliases: Dict[str, List[str]]) -> List[str]:
+    """The label names to search for when asked about *net_name*: a bus label's members."""
+    bus = try_parse_bus_label(net_name, aliases)
+    return list(bus.members) if bus is not None else [net_name]
+
+
 def get_connections_for_nets(
     schematic: Any,
     schematic_path: str,
     net_names: List[str],
     locator: Optional[PinLocator] = None,
+    aliases: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, List[Dict]]:
-    """Find all component pins connected to each named net across all sheets.
+    """Find all component pins on labels with each of *net_names*, across all sheets.
 
     Recursively discovers sub-sheets, processes each sheet independently, and
-    merges results. Handles label, global_label, hierarchical_label, and
-    power symbol connections.
+    merges results by label name. Handles label, global_label,
+    hierarchical_label, and power symbol connections. A bus label collects
+    the pins of all its members. Sheet pins whose two sides carry different
+    names are not followed; commands/design_netlist.py asks KiCad for that.
 
     Every sheet (including each sub-sheet) is loaded and scanned exactly once
     for the whole batch of nets — callers listing many nets should use this
@@ -1080,38 +1144,66 @@ def get_connections_for_nets(
 
     Returns {net_name: [{"component": ref, "pin": pin_num}, ...]}.
     """
+    by_sheet = pins_by_sheet(
+        schematic, schematic_path, _searched_names(net_names, aliases), locator
+    )
+    searched = {name: query_names(name, aliases or {}) for name in net_names}
+    results: Dict[str, List[Dict]] = {}
+    for net_name, names in searched.items():
+        merged: List[Dict] = []
+        keys: Set[Tuple[str, str]] = set()
+        for sheet_results in by_sheet.values():
+            for name in names:
+                for pin in sheet_results.get(name, []):
+                    key = (pin["component"], pin["pin"])
+                    if key not in keys:
+                        keys.add(key)
+                        merged.append(pin)
+        results[net_name] = merged
+    return results
+
+
+def _searched_names(net_names: List[str], aliases: Optional[Dict[str, List[str]]]) -> List[str]:
+    names: List[str] = []
+    for net_name in net_names:
+        names.extend(n for n in query_names(net_name, aliases or {}) if n not in names)
+    return names
+
+
+def pins_by_sheet(
+    schematic: Any,
+    schematic_path: str,
+    names: List[str],
+    locator: Optional[PinLocator] = None,
+) -> Dict[str, Dict[str, List[Dict]]]:
+    """For each sheet under *schematic_path*, the pins each label name reaches on that sheet.
+
+    Returns {sheet_path: {name: [{"component", "pin"}, ...]}}. Nothing is
+    joined across sheets.
+    """
     if locator is None:
         locator = PinLocator(memoize_pins=True)  # lives for this call only
     sexp_cache: Dict[str, list] = {}
-
-    seen: Dict[str, Set[Tuple[str, str]]] = {net_name: set() for net_name in net_names}
-    results: Dict[str, List[Dict]] = {net_name: [] for net_name in net_names}
-
-    def _collect(sheet_results: Dict[str, List[Dict]]) -> None:
-        for net_name, pins in sheet_results.items():
-            for pin in pins:
-                key = (pin["component"], pin["pin"])
-                if key not in seen[net_name]:
-                    seen[net_name].add(key)
-                    results[net_name].append(pin)
-
-    _collect(_process_single_sheet_nets(schematic, schematic_path, net_names, locator, sexp_cache))
-
-    sub_sheets = _discover_sub_sheets(schematic_path, sexp_cache)
-    for sub_path in sub_sheets:
+    found: Dict[str, Dict[str, List[Dict]]] = {
+        str(schematic_path): _process_single_sheet_nets(
+            schematic, schematic_path, names, locator, sexp_cache
+        )
+    }
+    for sub_path in _discover_sub_sheets(schematic_path, sexp_cache):
         try:
             from commands.schematic import SchematicLoadError, SchematicManager
 
             sub_sch = SchematicManager.load_schematic(sub_path)
-            _collect(_process_single_sheet_nets(sub_sch, sub_path, net_names, locator, sexp_cache))
+            found[sub_path] = _process_single_sheet_nets(
+                sub_sch, sub_path, names, locator, sexp_cache
+            )
         except SchematicLoadError:
             # A broken sub-sheet must fail the hierarchical traversal loudly
             # instead of silently omitting that sheet's pins from the net.
             raise
         except Exception as e:
             logger.warning(f"Error processing sub-sheet {sub_path}: {e}")
-
-    return results
+    return found
 
 
 def get_connections_for_net(schematic: Any, schematic_path: str, net_name: str) -> List[Dict]:

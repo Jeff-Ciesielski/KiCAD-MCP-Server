@@ -203,6 +203,22 @@ export const toolCategories: ToolCategory[] = [
     ],
   },
   {
+    name: "schematic_bus",
+    description:
+      "Schematic buses: draw and delete buses and bus entries, connect a run of pins to a bus, report bus members and wiring problems, and manage bus aliases",
+    tools: [
+      "add_schematic_bus",
+      "delete_schematic_bus",
+      "add_schematic_bus_entry",
+      "delete_schematic_bus_entry",
+      "list_schematic_buses",
+      "connect_pins_to_bus",
+      "list_bus_aliases",
+      "set_bus_alias",
+      "delete_bus_alias",
+    ],
+  },
+  {
     name: "schematic_layout",
     description:
       "Schematic field placement and geometry lint: move Ref/Value fields, autoplace them clear of bodies and labels, and find/snap off-grid coordinates",

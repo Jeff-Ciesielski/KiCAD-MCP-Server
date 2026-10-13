@@ -23,6 +23,10 @@ logger = logging.getLogger("kicad_interface")
 
 # Module-level Symbol constants — avoids repeated allocation on every call
 _SYM_WIRE = Symbol("wire")
+_SYM_BUS = Symbol("bus")
+_SYM_BUS_ENTRY = Symbol("bus_entry")
+_SYM_SIZE = Symbol("size")
+_SYM_SHEET = Symbol("sheet")
 _SYM_PTS = Symbol("pts")
 _SYM_XY = Symbol("xy")
 _SYM_AT = Symbol("at")
@@ -147,6 +151,55 @@ class WireManager:
     _SUB_UNIT_RE = re.compile(r"^(.+)_(\d+)_(\d+)$")
 
     @staticmethod
+    def _insertion_index(sch_data: list) -> int:
+        """Index before (sheet_instances) on a root sheet, or the end of a sub-sheet."""
+        for i, item in enumerate(sch_data):
+            if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
+                return i
+        return len(sch_data)
+
+    @staticmethod
+    def _add_segments(
+        schematic_path: Path,
+        points: List[List[float]],
+        kind: Symbol,
+        stroke_width: float = 0,
+        stroke_type: str = "default",
+    ) -> int:
+        """Write a path of two-point wire or bus segments and resync junctions.
+
+        KiCad segments hold exactly two points, so N waypoints become N-1
+        segments. An existing segment of the same kind that passes through
+        either end of the path is split there, which gives the T a shared
+        endpoint and a junction. Returns the number of segments written.
+        """
+        if len(points) < 2:
+            raise ValueError("A path needs at least 2 points")
+
+        with open(schematic_path, "r", encoding="utf-8") as f:
+            sch_data = sexpdata.loads(f.read())
+
+        for pt in (points[0], points[-1]):
+            splits = WireManager._break_wires_at_point(sch_data, pt, kind)
+            if splits:
+                logger.info(f"Broke {splits} {kind}(s) at new endpoint {pt}")
+
+        segments = [
+            WireManager._make_wire_sexp(points[i], points[i + 1], stroke_width, stroke_type, kind)
+            for i in range(len(points) - 1)
+        ]
+        at = WireManager._insertion_index(sch_data)
+        sch_data[at:at] = segments
+
+        WireManager.sync_junctions(sch_data)
+
+        text = kicad_dumps(sch_data)
+        with open(schematic_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.info(f"Wrote {len(segments)} {kind} segment(s) to {schematic_path.name}")
+        return len(segments)
+
+    @staticmethod
     def add_wire(
         schematic_path: Path,
         start_point: List[float],
@@ -168,51 +221,10 @@ class WireManager:
             True if successful, False otherwise
         """
         try:
-            # Read schematic
-            with open(schematic_path, "r", encoding="utf-8") as f:
-                sch_content = f.read()
-
-            sch_data = sexpdata.loads(sch_content)
-
-            # Break any existing wire that passes through a new endpoint (T-junction support)
-            for pt in (start_point, end_point):
-                splits = WireManager._break_wires_at_point(sch_data, pt)
-                if splits:
-                    logger.info(f"Broke {splits} wire(s) at new wire endpoint {pt}")
-
-            # Create wire S-expression
-            # Format: (wire (pts (xy x1 y1) (xy x2 y2)) (stroke (width N) (type default)) (uuid ...))
-            wire_sexp = WireManager._make_wire_sexp(
-                start_point, end_point, stroke_width, stroke_type
+            WireManager._add_segments(
+                schematic_path, [start_point, end_point], _SYM_WIRE, stroke_width, stroke_type
             )
-
-            # Find insertion point (before sheet_instances on the root sheet,
-            # or appended to the end on a hierarchical sub-sheet which has no
-            # sheet_instances block).
-            sheet_instances_index = None
-            for i, item in enumerate(sch_data):
-                if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
-                    sheet_instances_index = i
-                    break
-
-            if sheet_instances_index is None:
-                # Sub-sheets in hierarchical designs don't have (sheet_instances).
-                sheet_instances_index = len(sch_data)
-
-            # Insert wire before sheet_instances (or at end for sub-sheets)
-            sch_data.insert(sheet_instances_index, wire_sexp)
-            logger.info(f"Injected wire from {start_point} to {end_point}")
-
-            WireManager.sync_junctions(sch_data)
-
-            # Write back
-            with open(schematic_path, "w", encoding="utf-8") as f:
-                output = kicad_dumps(sch_data)
-                f.write(output)
-
-            logger.info(f"Successfully added wire to {schematic_path.name}")
             return True
-
         except Exception as e:
             logger.error(f"Error adding wire: {e}")
             import traceback
@@ -239,66 +251,53 @@ class WireManager:
         Returns:
             True if successful, False otherwise
         """
+        if len(points) < 2:
+            logger.error("Polyline requires at least 2 points")
+            return False
         try:
-            if len(points) < 2:
-                logger.error("Polyline requires at least 2 points")
-                return False
-
-            # Read schematic
-            with open(schematic_path, "r", encoding="utf-8") as f:
-                sch_content = f.read()
-
-            sch_data = sexpdata.loads(sch_content)
-
-            # Break any existing wire at the outer endpoints of the new path
-            for pt in (points[0], points[-1]):
-                splits = WireManager._break_wires_at_point(sch_data, pt)
-                if splits:
-                    logger.info(f"Broke {splits} wire(s) at new polyline endpoint {pt}")
-
-            # KiCAD wire elements only support exactly 2 pts each.
-            # Split N waypoints into N-1 individual wire segments.
-            wire_sexps = [
-                WireManager._make_wire_sexp(points[i], points[i + 1], stroke_width, stroke_type)
-                for i in range(len(points) - 1)
-            ]
-
-            # Find insertion point (before sheet_instances on the root sheet,
-            # or appended to the end on a hierarchical sub-sheet which has no
-            # sheet_instances block).
-            sheet_instances_index = None
-            for i, item in enumerate(sch_data):
-                if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
-                    sheet_instances_index = i
-                    break
-
-            if sheet_instances_index is None:
-                # Sub-sheets in hierarchical designs don't have (sheet_instances).
-                sheet_instances_index = len(sch_data)
-
-            # Insert all segments (in reverse so order is preserved after inserts)
-            for wire_sexp in reversed(wire_sexps):
-                sch_data.insert(sheet_instances_index, wire_sexp)
-            logger.info(
-                f"Injected {len(wire_sexps)} wire segments for {len(points)}-point polyline"
-            )
-
-            WireManager.sync_junctions(sch_data)
-
-            # Write back
-            with open(schematic_path, "w", encoding="utf-8") as f:
-                output = kicad_dumps(sch_data)
-                f.write(output)
-
-            logger.info(f"Successfully added polyline wire to {schematic_path.name}")
+            WireManager._add_segments(schematic_path, points, _SYM_WIRE, stroke_width, stroke_type)
             return True
-
         except Exception as e:
             logger.error(f"Error adding polyline wire: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
             return False
+
+    @staticmethod
+    def add_bus(
+        schematic_path: Path,
+        points: List[List[float]],
+        stroke_width: float = 0,
+        stroke_type: str = "default",
+    ) -> int:
+        """Add a bus along *points*. Returns the number of segments written."""
+        return WireManager._add_segments(
+            schematic_path, points, _SYM_BUS, stroke_width, stroke_type
+        )
+
+    @staticmethod
+    def _make_label_sexp(
+        text: str, position: List[float], label_type: str = "label", orientation: int = 0
+    ) -> list:
+        # Orientation-aware justify: KiCAD flips horizontal alignment for 180°/270°
+        justify_h = Symbol("right") if orientation in (180, 270) else Symbol("left")
+
+        justify_expr = [Symbol("justify"), justify_h]
+        if label_type == "label":
+            justify_expr.append(Symbol("bottom"))
+
+        return [
+            Symbol(label_type),
+            text,
+            [Symbol("at"), position[0], position[1], orientation],
+            [
+                Symbol("effects"),
+                [Symbol("font"), [Symbol("size"), 1.27, 1.27]],
+                justify_expr,
+            ],
+            [Symbol("uuid"), str(uuid.uuid4())],
+        ]
 
     @staticmethod
     def add_label(
@@ -327,24 +326,7 @@ class WireManager:
 
             sch_data = sexpdata.loads(sch_content)
 
-            # Orientation-aware justify: KiCAD flips horizontal alignment for 180°/270°
-            justify_h = Symbol("right") if orientation in (180, 270) else Symbol("left")
-
-            justify_expr = [Symbol("justify"), justify_h]
-            if label_type == "label":
-                justify_expr.append(Symbol("bottom"))
-
-            label_sexp = [
-                Symbol(label_type),
-                text,
-                [Symbol("at"), position[0], position[1], orientation],
-                [
-                    Symbol("effects"),
-                    [Symbol("font"), [Symbol("size"), 1.27, 1.27]],
-                    justify_expr,
-                ],
-                [Symbol("uuid"), str(uuid.uuid4())],
-            ]
+            label_sexp = WireManager._make_label_sexp(text, position, label_type, orientation)
 
             sheet_instances_index = None
             for i, item in enumerate(sch_data):
@@ -374,12 +356,13 @@ class WireManager:
     @staticmethod
     def _parse_wire(
         wire_item: Any,
+        kind: Symbol = _SYM_WIRE,
     ) -> Optional[Tuple[Tuple[float, float], Tuple[float, float], float, str]]:
         """
-        Parse a wire S-expression item in a single pass.
-        Returns ((x1,y1), (x2,y2), stroke_width, stroke_type), or None if not a valid wire.
+        Parse a wire (or, with kind=_SYM_BUS, a bus) S-expression item in a single pass.
+        Returns ((x1,y1), (x2,y2), stroke_width, stroke_type), or None if not a valid segment.
         """
-        if not (isinstance(wire_item, list) and len(wire_item) >= 2 and wire_item[0] == _SYM_WIRE):
+        if not (isinstance(wire_item, list) and len(wire_item) >= 2 and wire_item[0] == kind):
             return None
         start = end = None
         stroke_width: float = 0
@@ -440,36 +423,39 @@ class WireManager:
         end: List[float],
         stroke_width: float = 0,
         stroke_type: str = "default",
+        kind: Symbol = _SYM_WIRE,
     ) -> list:
         return [
-            _SYM_WIRE,
+            kind,
             [_SYM_PTS, [_SYM_XY, start[0], start[1]], [_SYM_XY, end[0], end[1]]],
             [_SYM_STROKE, [_SYM_WIDTH, stroke_width], [_SYM_TYPE, Symbol(stroke_type)]],
             [_SYM_UUID, str(uuid.uuid4())],
         ]
 
     @staticmethod
-    def _break_wires_at_point(sch_data: list, position: List[float]) -> int:
+    def _break_wires_at_point(
+        sch_data: list, position: List[float], kind: Symbol = _SYM_WIRE
+    ) -> int:
         """
-        Split any wire segment that passes through *position* as a strict
-        midpoint (i.e. position is not an existing endpoint).  Mirrors
-        KiCAD's SCH_LINE_WIRE_BUS_TOOL::BreakSegments behaviour.
+        Split any wire (or, with kind=_SYM_BUS, bus) segment that passes through
+        *position* as a strict midpoint (i.e. position is not an existing
+        endpoint).  Mirrors KiCAD's SCH_LINE_WIRE_BUS_TOOL::BreakSegments behaviour.
 
-        Returns the number of wires split.
+        Returns the number of segments split.
         """
         px, py = float(position[0]), float(position[1])
         splits = 0
         i = 0
         while i < len(sch_data):
-            parsed = WireManager._parse_wire(sch_data[i])
+            parsed = WireManager._parse_wire(sch_data[i], kind)
             if parsed is not None:
                 (x1, y1), (x2, y2), stroke_width, stroke_type = parsed
                 if WireManager._point_strictly_on_wire(px, py, x1, y1, x2, y2):
                     seg_a = WireManager._make_wire_sexp(
-                        [x1, y1], [px, py], stroke_width, stroke_type
+                        [x1, y1], [px, py], stroke_width, stroke_type, kind
                     )
                     seg_b = WireManager._make_wire_sexp(
-                        [px, py], [x2, y2], stroke_width, stroke_type
+                        [px, py], [x2, y2], stroke_width, stroke_type, kind
                     )
                     sch_data[i : i + 1] = [seg_a, seg_b]
                     logger.info(f"Split wire ({x1},{y1})->({x2},{y2}) at ({px},{py})")
@@ -480,11 +466,13 @@ class WireManager:
         return splits
 
     @staticmethod
-    def _collect_wire_endpoints(sch_data: list) -> List[Tuple[float, float]]:
-        """Return all (x, y) endpoints for every wire in sch_data."""
+    def _collect_wire_endpoints(
+        sch_data: list, kind: Symbol = _SYM_WIRE
+    ) -> List[Tuple[float, float]]:
+        """Return all (x, y) endpoints for every wire (or bus) in sch_data."""
         endpoints: List[Tuple[float, float]] = []
         for item in sch_data:
-            parsed = WireManager._parse_wire(item)
+            parsed = WireManager._parse_wire(item, kind)
             if parsed is not None:
                 (x1, y1), (x2, y2), _, _ = parsed
                 endpoints.append((x1, y1))
@@ -673,58 +661,131 @@ class WireManager:
         return world_positions
 
     @staticmethod
-    def sync_junctions(sch_data: list) -> Tuple[int, int]:
-        """Add missing junctions and remove stale ones in sch_data in-place.
+    def _collect_sheet_pin_positions(sch_data: list) -> List[Tuple[float, float]]:
+        """Return the (x, y) of every pin on every sheet symbol in sch_data."""
+        positions: List[Tuple[float, float]] = []
+        for item in sch_data:
+            if not (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET):
+                continue
+            for part in item[1:]:
+                if not (isinstance(part, list) and len(part) > 2 and part[0] == _SYM_PIN):
+                    continue
+                at = next(
+                    (
+                        p
+                        for p in part[2:]
+                        if isinstance(p, list) and len(p) >= 3 and p[0] == _SYM_AT
+                    ),
+                    None,
+                )
+                if at is not None:
+                    positions.append((float(at[1]), float(at[2])))
+        return positions
 
-        A junction is needed at any point where the total of wire endpoints plus
-        component pin positions is ≥ 3 and at least one wire endpoint is present.
-        This covers wire-only T/X junctions and wire-meets-pin-with-another-wire cases.
+    @staticmethod
+    def _junction_points(
+        segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+        anchors: List[Tuple[float, float]],
+        existing: set,
+    ) -> Tuple[set, set]:
+        """Junction points for segments of one kind: (points to add, existing points to keep).
 
-        Returns (added_count, removed_count).
+        Each point counts its connections: one per segment end and per pin or
+        sheet pin there, and two per segment passing through it. KiCad only
+        joins a segment's middle through a junction, so a junction with three
+        or more connections is load-bearing: at a T, at a crossing someone
+        joined, or where a pin sits on a wire's middle. One is added only
+        where a segment ends and three or more connections meet, as KiCad does
+        when a wire is drawn; a plain crossing stays unjoined.
         """
         from collections import Counter
 
-        wire_endpoints = WireManager._collect_wire_endpoints(sch_data)
-        wire_iu: Counter = Counter(
-            (round(x * _IU_PER_MM), round(y * _IU_PER_MM)) for x, y in wire_endpoints
-        )
+        def iu(pt: Tuple[float, float]) -> Tuple[int, int]:
+            return (round(pt[0] * _IU_PER_MM), round(pt[1] * _IU_PER_MM))
 
-        pin_positions = WireManager._collect_pin_positions(sch_data)
-        pin_iu: Counter = Counter(
-            (round(x * _IU_PER_MM), round(y * _IU_PER_MM)) for x, y in pin_positions
-        )
+        ends: Counter = Counter()
+        rows: dict = {}
+        cols: dict = {}
+        slanted: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
+        for a, b in segments:
+            (ax, ay), (bx, by) = iu(a), iu(b)
+            ends[(ax, ay)] += 1
+            ends[(bx, by)] += 1
+            if ay == by and ax != bx:
+                rows.setdefault(ay, []).append((min(ax, bx), max(ax, bx)))
+            elif ax == bx and ay != by:
+                cols.setdefault(ax, []).append((min(ay, by), max(ay, by)))
+            elif (ax, ay) != (bx, by):
+                slanted.append(((ax, ay), (bx, by)))
+        anchor_count: Counter = Counter(iu(pt) for pt in anchors)
 
-        # wire_iu.items() guarantees wire_cnt >= 1, so no extra guard needed
-        needed_iu = {iu for iu, wire_cnt in wire_iu.items() if wire_cnt + pin_iu.get(iu, 0) >= 3}
+        def passes(x: int, y: int) -> int:
+            count = sum(1 for lo, hi in rows.get(y, ()) if lo < x < hi)
+            count += sum(1 for lo, hi in cols.get(x, ()) if lo < y < hi)
+            for (ax, ay), (bx, by) in slanted:
+                if (
+                    (bx - ax) * (y - ay) == (by - ay) * (x - ax)
+                    and min(ax, bx) <= x <= max(ax, bx)
+                    and min(ay, by) <= y <= max(ay, by)
+                    and (x, y) not in ((ax, ay), (bx, by))
+                ):
+                    count += 1
+            return count
+
+        def connections(pt: Tuple[int, int]) -> int:
+            return ends.get(pt, 0) + anchor_count.get(pt, 0) + 2 * passes(*pt)
+
+        add = {pt for pt in ends if connections(pt) >= 3}
+        keep = {pt for pt in existing if connections(pt) >= 3}
+        return add, keep
+
+    @staticmethod
+    def sync_junctions(sch_data: list) -> Tuple[int, int]:
+        """Add missing junctions and remove stale ones in sch_data in-place.
+
+        Wires and buses are checked separately, since a wire never joins a
+        bus directly. For wires, component pins and sheet pins count as
+        connections; for buses, sheet pins do. See _junction_points for the
+        rule. A junction is removed only when neither kind needs it.
+
+        Returns (added_count, removed_count).
+        """
+
+        def segments(kind: Symbol) -> list:
+            found = []
+            for item in sch_data:
+                parsed = WireManager._parse_wire(item, kind)
+                if parsed is not None:
+                    found.append((parsed[0], parsed[1]))
+            return found
 
         existing = WireManager._get_existing_junctions(sch_data)
         existing_iu = set(existing.keys())
+        sheet_pins = WireManager._collect_sheet_pin_positions(sch_data)
+        wire_add, wire_keep = WireManager._junction_points(
+            segments(_SYM_WIRE),
+            WireManager._collect_pin_positions(sch_data) + sheet_pins,
+            existing_iu,
+        )
+        bus_add, bus_keep = WireManager._junction_points(
+            segments(_SYM_BUS), sheet_pins, existing_iu
+        )
+        needed_iu = wire_add | bus_add
+        kept_iu = wire_keep | bus_keep | needed_iu
 
         # Remove stale junctions; work in reverse index order to avoid shifting
-        stale_indices = sorted([existing[iu] for iu in existing_iu - needed_iu], reverse=True)
+        stale_indices = sorted([existing[iu] for iu in existing_iu - kept_iu], reverse=True)
         for idx in stale_indices:
             del sch_data[idx]
         removed = len(stale_indices)
 
-        # Locate insertion point for new junctions
-        sheet_instances_index = None
-        for i, item in enumerate(sch_data):
-            if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
-                sheet_instances_index = i
-                break
-
-        to_add = needed_iu - existing_iu
+        at = WireManager._insertion_index(sch_data)
         added = 0
-        if to_add:
-            if sheet_instances_index is None:
-                logger.warning("sync_junctions: no sheet_instances found, skipping junction insert")
-            else:
-                for iu_x, iu_y in to_add:
-                    x = iu_x / _IU_PER_MM
-                    y = iu_y / _IU_PER_MM
-                    sch_data.insert(sheet_instances_index, WireManager._make_junction_sexp(x, y))
-                    sheet_instances_index += 1
-                    added += 1
+        for iu_x, iu_y in sorted(needed_iu - existing_iu):
+            junction = WireManager._make_junction_sexp(iu_x / _IU_PER_MM, iu_y / _IU_PER_MM)
+            sch_data.insert(at, junction)
+            at += 1
+            added += 1
 
         if added or removed:
             logger.info(f"sync_junctions: added {added}, removed {removed}")
@@ -788,6 +849,43 @@ class WireManager:
             return False
 
     @staticmethod
+    def _delete_segment(
+        schematic_path: Path,
+        start_point: List[float],
+        end_point: List[float],
+        kind: Symbol,
+        tolerance: float,
+    ) -> bool:
+        """Remove the first segment of *kind* whose ends match, in either direction."""
+        with open(schematic_path, "r", encoding="utf-8") as f:
+            sch_data = sexpdata.loads(f.read())
+
+        sx, sy = start_point
+        ex, ey = end_point
+
+        def near(ax: float, ay: float, bx: float, by: float) -> bool:
+            return abs(ax - bx) < tolerance and abs(ay - by) < tolerance
+
+        for i, item in enumerate(sch_data):
+            parsed = WireManager._parse_wire(item, kind)
+            if parsed is None:
+                continue
+            (x1, y1), (x2, y2), _, _ = parsed
+            if (near(x1, y1, sx, sy) and near(x2, y2, ex, ey)) or (
+                near(x1, y1, ex, ey) and near(x2, y2, sx, sy)
+            ):
+                del sch_data[i]
+                WireManager.sync_junctions(sch_data)
+                text = kicad_dumps(sch_data)
+                with open(schematic_path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                logger.info(f"Deleted {kind} from {start_point} to {end_point}")
+                return True
+
+        logger.warning(f"No matching {kind} found for {start_point} to {end_point}")
+        return False
+
+    @staticmethod
     def delete_wire(
         schematic_path: Path,
         start_point: List[float],
@@ -807,69 +905,107 @@ class WireManager:
             True if a wire was found and removed, False otherwise
         """
         try:
-            with open(schematic_path, "r", encoding="utf-8") as f:
-                sch_content = f.read()
-
-            sch_data = sexpdata.loads(sch_content)
-
-            sx, sy = start_point
-            ex, ey = end_point
-
-            for i, item in enumerate(sch_data):
-                if not (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_WIRE):
-                    continue
-
-                # Extract pts from the wire s-expression
-                pts_list = None
-                for part in item[1:]:
-                    if isinstance(part, list) and len(part) > 0 and part[0] == _SYM_PTS:
-                        pts_list = part
-                        break
-
-                if pts_list is None:
-                    continue
-
-                xy_points = [
-                    p
-                    for p in pts_list[1:]
-                    if isinstance(p, list) and len(p) >= 3 and p[0] == _SYM_XY
-                ]
-                if len(xy_points) < 2:
-                    continue
-
-                x1, y1 = float(xy_points[0][1]), float(xy_points[0][2])
-                x2, y2 = float(xy_points[-1][1]), float(xy_points[-1][2])
-
-                match_fwd = (
-                    abs(x1 - sx) < tolerance
-                    and abs(y1 - sy) < tolerance
-                    and abs(x2 - ex) < tolerance
-                    and abs(y2 - ey) < tolerance
-                )
-                match_rev = (
-                    abs(x1 - ex) < tolerance
-                    and abs(y1 - ey) < tolerance
-                    and abs(x2 - sx) < tolerance
-                    and abs(y2 - sy) < tolerance
-                )
-
-                if match_fwd or match_rev:
-                    del sch_data[i]
-                    WireManager.sync_junctions(sch_data)
-                    with open(schematic_path, "w", encoding="utf-8") as f:
-                        f.write(kicad_dumps(sch_data))
-                    logger.info(f"Deleted wire from {start_point} to {end_point}")
-                    return True
-
-            logger.warning(f"No matching wire found for {start_point} to {end_point}")
-            return False
-
+            return WireManager._delete_segment(
+                schematic_path, start_point, end_point, _SYM_WIRE, tolerance
+            )
         except Exception as e:
             logger.error(f"Error deleting wire: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
             return False
+
+    @staticmethod
+    def delete_bus(
+        schematic_path: Path,
+        start_point: List[float],
+        end_point: List[float],
+        tolerance: float = 0.5,
+    ) -> bool:
+        """Delete the bus segment with these end points. Returns False when none matches."""
+        return WireManager._delete_segment(
+            schematic_path, start_point, end_point, _SYM_BUS, tolerance
+        )
+
+    @staticmethod
+    def _parse_bus_entry(item: Any) -> Optional[Tuple[Tuple[float, float], Tuple[float, float]]]:
+        """Return ((x, y), (dx, dy)) for a (bus_entry ...) item, or None."""
+        if not (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_BUS_ENTRY):
+            return None
+        at = size = None
+        for part in item[1:]:
+            if isinstance(part, list) and len(part) >= 3:
+                if part[0] == _SYM_AT:
+                    at = (float(part[1]), float(part[2]))
+                elif part[0] == _SYM_SIZE:
+                    size = (float(part[1]), float(part[2]))
+        if at is None or size is None:
+            return None
+        return at, size
+
+    @staticmethod
+    def _make_bus_entry_sexp(position: List[float], size: List[float]) -> list:
+        return [
+            _SYM_BUS_ENTRY,
+            [_SYM_AT, position[0], position[1]],
+            [_SYM_SIZE, size[0], size[1]],
+            [_SYM_STROKE, [_SYM_WIDTH, 0], [_SYM_TYPE, Symbol("default")]],
+            [_SYM_UUID, str(uuid.uuid4())],
+        ]
+
+    @staticmethod
+    def add_bus_entries(
+        schematic_path: Path, entries: List[Tuple[List[float], List[float]]]
+    ) -> int:
+        """Add bus entries, each given as (position, size).
+
+        *position* is the end that touches the bus; position + size is the end
+        a wire attaches to. KiCad draws entries as 45 degree stubs, so each
+        size component is normally +2.54 or -2.54. Returns the number added.
+        """
+        with open(schematic_path, "r", encoding="utf-8") as f:
+            sch_data = sexpdata.loads(f.read())
+        at = WireManager._insertion_index(sch_data)
+        sch_data[at:at] = [WireManager._make_bus_entry_sexp(pos, size) for pos, size in entries]
+        text = kicad_dumps(sch_data)
+        with open(schematic_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.info(f"Added {len(entries)} bus entr(y/ies) to {schematic_path.name}")
+        return len(entries)
+
+    @staticmethod
+    def delete_bus_entry(
+        schematic_path: Path, position: List[float], tolerance: float = 0.5
+    ) -> bool:
+        """Delete the bus entry with an end nearest *position*, within *tolerance*.
+
+        Either end matches: KiCad joins an entry to the bus at either end, so
+        the (at ...) point is not always the bus end.
+
+        Returns False when no entry is that close.
+        """
+        with open(schematic_path, "r", encoding="utf-8") as f:
+            sch_data = sexpdata.loads(f.read())
+        best: Optional[Tuple[float, int]] = None
+        for i, item in enumerate(sch_data):
+            parsed = WireManager._parse_bus_entry(item)
+            if parsed is None:
+                continue
+            (x, y), (dx, dy) = parsed
+            dist = min(
+                math.hypot(x - position[0], y - position[1]),
+                math.hypot(x + dx - position[0], y + dy - position[1]),
+            )
+            if dist <= tolerance and (best is None or dist < best[0]):
+                best = (dist, i)
+        if best is None:
+            return False
+        del sch_data[best[1]]
+        text = kicad_dumps(sch_data)
+        with open(schematic_path, "w", encoding="utf-8") as f:
+            f.write(text)
+        logger.info(f"Deleted bus entry at {position}")
+        return True
 
     @staticmethod
     def delete_label(

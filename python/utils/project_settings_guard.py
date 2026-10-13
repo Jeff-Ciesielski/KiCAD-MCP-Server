@@ -81,6 +81,11 @@ def _write_json_atomic(path: str, data: Dict[str, Any]) -> None:
     directory = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=".prosettings-", suffix=".kicad_pro")
     try:
+        # mkstemp creates the file 0600; keep the project file's own mode.
+        try:
+            os.chmod(tmp_path, os.stat(path).st_mode & 0o7777)
+        except FileNotFoundError:
+            pass
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             # No sort_keys: #220 made the .kicad_pro byte-faithful to KiCad's
             # own output, and alphabetising every key would undo that on the

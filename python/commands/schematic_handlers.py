@@ -1765,16 +1765,18 @@ class SchematicHandlersMixin:
         """List all nets in a schematic with their connections"""
         logger.info("Listing schematic nets")
         try:
+            from commands.bus_connectivity import design_aliases, try_parse_bus_label
+            from commands.design_netlist import (
+                DesignNetlist,
+                export_design_netlist,
+                label_nets,
+                label_pins,
+            )
             from commands.pin_locator import PinLocator
             from commands.wire_connectivity import (
-                _build_adjacency,
                 _discover_sub_sheets,
                 _load_sexp,
                 _parse_labels_sexp,
-                _parse_virtual_connections,
-                _parse_wires,
-                count_pins_on_net,
-                get_connections_for_nets,
             )
 
             schematic_path = params.get("schematicPath")
@@ -1820,47 +1822,74 @@ class SchematicHandlersMixin:
                     except Exception as e:
                         logger.warning(f"Error reading sub-sheet {sub_path}: {e}")
 
-            # Pre-build shared wire graph structures for efficiency
-            all_wires = _parse_wires(schematic)
-            if all_wires:
-                adjacency, iu_to_wires = _build_adjacency(all_wires)
-            else:
-                adjacency, iu_to_wires = [], {}
-            point_to_label, label_to_points = _parse_virtual_connections(schematic, schematic_path)
-
-            # One shared locator + one batched connectivity pass: every sheet
-            # is parsed and pin-located once for the whole net list, instead of
-            # once per net (which made this handler O(nets × sheet size) and
-            # took minutes on large flat schematics).
-            sorted_net_names = sorted(net_names)
+            # A bus label is not a net: its members are.
+            aliases, problems = design_aliases(schematic_path) if sexp_loaded else ({}, [])
+            buses: Dict[str, Dict[str, Any]] = {}
+            for name in list(net_names):
+                bus = try_parse_bus_label(name, aliases)
+                if bus is None:
+                    continue
+                net_names.discard(name)
+                buses[name] = {"name": name, "kind": bus.kind, "members": list(bus.members)}
             locator = PinLocator(memoize_pins=True)  # this request only
-            connections_by_net = get_connections_for_nets(
-                schematic, schematic_path, sorted_net_names, locator=locator
+
+            # KiCad's netlist decides which labels are one net: sheet pins,
+            # bus pins, global labels and reused sheets all follow its rules.
+            netlist = (
+                export_design_netlist(schematic_path)
+                if sexp_loaded
+                else "the schematic file could not be read"
             )
-
-            nets = []
-            for net_name in sorted_net_names:
-                connections = connections_by_net[net_name]
-                pin_count = count_pins_on_net(
-                    schematic,
-                    schematic_path,
-                    net_name,
-                    all_wires,
-                    iu_to_wires,
-                    adjacency,
-                    point_to_label,
-                    label_to_points,
-                    locator=locator,
-                )
-                nets.append(
-                    {
-                        "name": net_name,
-                        "connections": connections,
-                        "connected_pin_count": pin_count,
+            if isinstance(netlist, DesignNetlist):
+                pins_of_labels = label_pins(schematic, schematic_path, sorted(net_names), locator)
+                labels_by_net: Dict[str, List[str]] = {}
+                unplaced: List[str] = []
+                for name, kicad_nets in label_nets(schematic_path, netlist, pins_of_labels).items():
+                    if not kicad_nets:
+                        unplaced.append(name)
+                    for kicad_net in kicad_nets:
+                        labels_by_net.setdefault(kicad_net, []).append(name)
+                nets = []
+                for kicad_net, pins in sorted(netlist.named_nets().items()):
+                    entry: Dict[str, Any] = {
+                        "name": kicad_net,
+                        "connections": [{"component": r, "pin": n} for r, n in pins],
+                        "connected_pin_count": len(pins),
                     }
+                    if kicad_net in labels_by_net:
+                        entry["labels"] = sorted(labels_by_net[kicad_net])
+                    nets.append(entry)
+                # A label that reaches no pin is on no KiCad net; list it with
+                # no connections so it is not silently missing.
+                for name in sorted(unplaced):
+                    nets.append(
+                        {
+                            "name": name,
+                            "connections": [],
+                            "connected_pin_count": 0,
+                            "labels": [name],
+                        }
+                    )
+                result: Dict[str, Any] = {
+                    "success": True,
+                    "nets": nets,
+                    "count": len(nets),
+                    "connectivitySource": "kicad-cli",
+                }
+            else:
+                result = self._list_nets_by_label(
+                    schematic, schematic_path, sorted(net_names), aliases, locator
                 )
-
-            return {"success": True, "nets": nets, "count": len(nets)}
+                problems.insert(
+                    0,
+                    f"KiCad netlist unavailable ({netlist}); nets are matched by label name "
+                    "and sheet pins that rename a net are not followed",
+                )
+            if buses:
+                result["buses"] = [buses[name] for name in sorted(buses)]
+            if problems:
+                result["warnings"] = problems
+            return result
 
         except Exception as e:
             logger.error(f"Error listing schematic nets: {e}")
@@ -1868,6 +1897,59 @@ class SchematicHandlersMixin:
 
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
+
+    @staticmethod
+    def _list_nets_by_label(
+        schematic: Any,
+        schematic_path: str,
+        net_names: List[str],
+        aliases: Dict[str, List[str]],
+        locator: Any,
+    ) -> Dict[str, Any]:
+        """List nets by label name, for when the KiCad netlist is not available."""
+        from commands.wire_connectivity import (
+            _build_adjacency,
+            _parse_virtual_connections,
+            _parse_wires,
+            count_pins_on_net,
+            get_connections_for_nets,
+        )
+
+        all_wires = _parse_wires(schematic)
+        if all_wires:
+            adjacency, iu_to_wires = _build_adjacency(all_wires)
+        else:
+            adjacency, iu_to_wires = [], {}
+        point_to_label, label_to_points = _parse_virtual_connections(schematic, schematic_path)
+
+        # One shared locator + one batched connectivity pass: every sheet
+        # is parsed and pin-located once for the whole net list, instead of
+        # once per net (which made this handler O(nets × sheet size) and
+        # took minutes on large flat schematics).
+        connections_by_net = get_connections_for_nets(
+            schematic, schematic_path, net_names, locator=locator, aliases=aliases
+        )
+        nets = []
+        for net_name in net_names:
+            pin_count = count_pins_on_net(
+                schematic,
+                schematic_path,
+                net_name,
+                all_wires,
+                iu_to_wires,
+                adjacency,
+                point_to_label,
+                label_to_points,
+                locator=locator,
+            )
+            nets.append(
+                {
+                    "name": net_name,
+                    "connections": connections_by_net[net_name],
+                    "connected_pin_count": pin_count,
+                }
+            )
+        return {"success": True, "nets": nets, "count": len(nets), "connectivitySource": "labels"}
 
     def _handle_list_schematic_wires(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """List all wires in a schematic"""
@@ -2905,6 +2987,7 @@ class SchematicHandlersMixin:
         from collections import defaultdict
         from pathlib import Path
 
+        from commands.bus_connectivity import design_aliases, try_parse_bus_label
         from commands.pin_locator import PinLocator
         from utils.sheet_tree import sheet_tree
 
@@ -2954,7 +3037,15 @@ class SchematicHandlersMixin:
             point_net: dict = {}  # snap(x,y) -> net_name
 
             for attr in ("label", "global_label", "hierarchical_label"):
-                for lbl in getattr(sch, attr, None) or []:
+                labels = getattr(sch, attr, None)
+                # kicad-skip has no collection type for hierarchical_label: a
+                # sheet with exactly one returns that label itself, and
+                # `labels or []` on it raises TypeError.
+                if labels is None:
+                    labels = []
+                elif hasattr(labels, "at") and hasattr(labels, "value"):
+                    labels = [labels]
+                for lbl in labels:
                     try:
                         pos = lbl.at.value
                         name = lbl.value
@@ -3014,6 +3105,20 @@ class SchematicHandlersMixin:
             all_wire_pts = set()
             for seg in wire_segments:
                 all_wire_pts.update(seg)
+
+            # A label on the middle of a wire names that wire. Give its name
+            # to the wire's first point so the BFS below spreads it; without
+            # this only labels on a wire end were seen.
+            for (lx, ly), name in list(point_net.items()):
+                if (lx, ly) in all_wire_pts:
+                    continue
+                for seg in wire_segments:
+                    (ax, ay), (bx, by) = seg[0], seg[-1]
+                    on_row = ay == by == ly and min(ax, bx) < lx < max(ax, bx)
+                    on_col = ax == bx == lx and min(ay, by) < ly < max(ay, by)
+                    if on_row or on_col:
+                        point_net.setdefault(seg[0], name)
+                        break
 
             # BFS: propagate known net names through wire connections
             queue = [pt for pt in all_wire_pts if pt in point_net]
@@ -3096,6 +3201,15 @@ class SchematicHandlersMixin:
                 if net:
                     pad_net_map[(ref, pin_num)] = net
 
+        # A bus label names a bus, never a board net.
+        aliases, _problems = design_aliases(project_sch_path)
+        pad_net_map = {
+            pad: net
+            for pad, net in pad_net_map.items()
+            if try_parse_bus_label(net, aliases) is None
+        }
+        all_net_names = {n for n in all_net_names if try_parse_bus_label(n, aliases) is None}
+
         logger.info(
             f"_build_hierarchical_pad_net_map: {len(pad_net_map)} pin→net assignments, "
             f"{len(all_net_names)} unique nets"
@@ -3109,6 +3223,9 @@ class SchematicHandlersMixin:
         logger.info("Syncing schematic to board")
         try:
             from pathlib import Path
+
+            from commands.design_netlist import DesignNetlist, export_design_netlist
+            from utils.sheet_tree import sheet_tree
 
             schematic_path = params.get("schematicPath")
             board_path = params.get("boardPath")
@@ -3155,11 +3272,26 @@ class SchematicHandlersMixin:
                     "message": f"Schematic not found. Provide schematicPath. Tried: {schematic_path}",
                 }
 
-            # Build the pad->net map from the sheets reachable from the root
+            # Build the pad->net map. KiCad's netlist is exact: sheet pins,
+            # bus pins, global labels, reused sheets and KiCad's net names.
+            # Without kicad-cli, nets are matched by label name.
             sheets_scanned: list = []
-            pad_net_map, net_names = self._build_hierarchical_pad_net_map(
-                schematic_path, sheets_out=sheets_scanned
-            )
+            sync_warnings: List[str] = []
+            netlist = export_design_netlist(schematic_path)
+            if isinstance(netlist, DesignNetlist):
+                pad_net_map = netlist.net_of()
+                net_names = set(netlist.nets)
+                sheets_scanned.extend(str(p) for p in sheet_tree(Path(schematic_path)))
+                connectivity_source = "kicad-cli"
+            else:
+                pad_net_map, net_names = self._build_hierarchical_pad_net_map(
+                    schematic_path, sheets_out=sheets_scanned
+                )
+                connectivity_source = "labels"
+                sync_warnings.append(
+                    f"KiCad netlist unavailable ({netlist}); nets were matched by label name, "
+                    "so a sheet pin that renames a net was not followed"
+                )
 
             # Add missing footprints from the schematic to the board *before*
             # we add nets and assign pads — F8 in KiCad does this implicitly
@@ -3216,7 +3348,7 @@ class SchematicHandlersMixin:
             # Net-(REF-PadN) name), so an unmatched pad is one the schematic
             # does not wire at all, or a pad the symbol does not have. Report
             # all of them: a ten-entry sample buried a 25-pad failure (#400).
-            warnings: List[str] = []
+            warnings: List[str] = list(sync_warnings)
             if unmatched:
                 warnings.append(
                     f"{len(unmatched)} pad(s) have no net in the schematic and were left "
@@ -3237,6 +3369,7 @@ class SchematicHandlersMixin:
                     f"{len(added_nets)} nets added, {assigned_pads} pads assigned"
                 ),
                 "sheets_scanned": sheet_names,
+                "connectivitySource": connectivity_source,
                 "nets_added": added_nets,
                 "nets_total": len(net_names),
                 "pads_assigned": assigned_pads,

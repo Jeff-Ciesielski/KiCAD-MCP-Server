@@ -3,8 +3,9 @@
 Added in: v2.1.0, expanded through v2.7.0
 Contributors: @Mehanik (PRs #60, #66), @Kletternaut (PR #57), @karu2003 (v2.7.0)
 
-`src/tools/schematic.ts` registers 46 schematic tools; another 19 live in
-`schematic-batch.ts`, `schematic-hierarchy.ts` and `schematic-layout.ts`. This
+`src/tools/schematic.ts` registers 46 schematic tools; another 28 live in
+`schematic-batch.ts`, `schematic-hierarchy.ts`, `schematic-layout.ts` and
+`schematic-bus.ts`. This
 document covers the ones that need more explanation than a one-line summary. For
 the full list, see the generated [Tool Inventory](TOOL_INVENTORY.md).
 
@@ -377,6 +378,119 @@ Checks net label / power symbol positions first (exact IU match), then wire endp
 | net_name | Net label string, or `null` if no net found at this point               |
 | position | `{"x": float, "y": float}` — echoes the query coordinates               |
 | source   | `"net_label"` \| `"wire_endpoint"` \| `null` — how the net was resolved |
+
+## Buses (9 tools)
+
+A bus gets its members from a bus label placed on it with
+`add_schematic_net_label`: a vector such as `D[0..7]` or a group such as
+`I2C{SDA SCL}`. A bus with no label, drawn between sheet pins, takes its
+members from the pin names. Wires join a bus member through a bus entry and their own
+label; an unlabelled wire on a bus entry joins nothing. See
+[Schematic Buses](SCHEMATIC_BUSES.md) for the full rules, checked against
+kicad-cli.
+
+A typical sequence:
+
+1. `add_schematic_bus` with the bus path.
+2. `add_schematic_net_label` with `netName: "D[0..7]"` at a point on the bus.
+3. `connect_pins_to_bus` with the pins and the member each one carries.
+4. `list_schematic_buses` to confirm `problems` is empty.
+
+For a bus that crosses into a sub-sheet, give the sheet pin and the sub-sheet's
+hierarchical label the same bus text (for example `A[0..7]`), and label the
+parent bus. Vector members pair by position and group members by name.
+
+### add_schematic_bus
+
+Draw a bus through two or more waypoints. A bus segment that the new bus ends
+on the middle of is split there, and junctions are added where needed.
+
+| Parameter     | Type   | Required | Description                                  |
+| ------------- | ------ | -------- | -------------------------------------------- |
+| schematicPath | string | Yes      | Path to the `.kicad_sch` file                |
+| waypoints     | array  | Yes      | Ordered list of `[x, y]` in mm, at least two |
+
+The response warns when the bus has neither a bus label nor a bus sheet pin.
+
+### delete_schematic_bus
+
+Delete one bus segment by its end points, in either order.
+
+| Parameter     | Type   | Required | Description                   |
+| ------------- | ------ | -------- | ----------------------------- |
+| schematicPath | string | Yes      | Path to the `.kicad_sch` file |
+| start         | object | Yes      | `{x, y}` of one end           |
+| end           | object | Yes      | `{x, y}` of the other end     |
+
+### add_schematic_bus_entry
+
+Add a 45 degree bus entry whose bus end sits on an existing bus. The response
+gives `wireEnd`, where a labelled wire should start.
+
+| Parameter     | Type   | Required | Description                                                                         |
+| ------------- | ------ | -------- | ----------------------------------------------------------------------------------- |
+| schematicPath | string | Yes      | Path to the `.kicad_sch` file                                                       |
+| position      | object | Yes      | `{x, y}` on the bus                                                                 |
+| direction     | string | No       | `up_right`, `down_right` (default), `up_left` or `down_left`; y grows down the page |
+
+### delete_schematic_bus_entry
+
+Delete the bus entry with an end within 0.5 mm of `position`.
+
+| Parameter     | Type   | Required | Description                     |
+| ------------- | ------ | -------- | ------------------------------- |
+| schematicPath | string | Yes      | Path to the `.kicad_sch` file   |
+| position      | object | Yes      | `{x, y}` of the entry's bus end |
+
+### list_schematic_buses
+
+Report each bus network on one sheet: its segments, bus labels and members,
+bus entries with the net each one feeds, and the sheet pins it reaches.
+`problems` lists what KiCad ERC would flag, such as an entry feeding an
+unlabelled wire or a net that is not a member.
+
+| Parameter     | Type   | Required | Description                   |
+| ------------- | ------ | -------- | ----------------------------- |
+| schematicPath | string | Yes      | Path to the `.kicad_sch` file |
+
+### connect_pins_to_bus
+
+Connect symbol pins to a bus in one call: one bus entry, one straight wire and
+one member label per pin. A vertical bus feeds horizontal wires, a horizontal
+bus vertical ones, so each pin must sit at least 2.54 mm to one side of a bus
+segment. Nothing is written when any pin cannot be placed or a net is not a
+member of the bus label.
+
+| Parameter     | Type   | Required | Description                                       |
+| ------------- | ------ | -------- | ------------------------------------------------- |
+| schematicPath | string | Yes      | Path to the `.kicad_sch` file                     |
+| busPoint      | object | Yes      | `{x, y}` of any point on the target bus           |
+| connections   | array  | Yes      | `[{reference, pin, net}]`, net being a bus member |
+
+```json
+{
+  "schematicPath": "main.kicad_sch",
+  "busPoint": { "x": 50.8, "y": 70 },
+  "connections": [
+    { "reference": "U1", "pin": "12", "net": "D0" },
+    { "reference": "U1", "pin": "13", "net": "D1" }
+  ]
+}
+```
+
+### list_bus_aliases / set_bus_alias / delete_bus_alias
+
+Read and edit the bus aliases in the project file (`schematic.bus_aliases` in
+the `.kicad_pro`). Pass `projectPath`, or any `schematicPath` of the project.
+An alias is used inside braces: `{MEM}` or `PREFIX{MEM}`. KiCad reads the
+project file when it opens the project.
+
+| Parameter     | Type   | Required   | Description                                       |
+| ------------- | ------ | ---------- | ------------------------------------------------- |
+| schematicPath | string | One of     | A `.kicad_sch` of the project                     |
+| projectPath   | string | One of     | The `.kicad_pro` file                             |
+| name          | string | set/delete | Alias name, one word                              |
+| members       | array  | set        | Member names or vectors, e.g. `["D[0..7]", "WE"]` |
 
 ## Text Annotations (2 tools)
 

@@ -5,9 +5,9 @@
      in this file are preserved, so improving the wording here is safe. -->
 
 **Version:** 2.8.2
-**Tools registered on the server:** 244
-**Tools indexed for keyword discovery:** 184 in 17 categories
-**Last updated:** 2026-09-24
+**Tools registered on the server:** 253
+**Tools indexed for keyword discovery:** 193 in 18 categories
+**Last updated:** 2026-10-13
 
 ## How to read this document
 
@@ -281,6 +281,24 @@ _Source: `src/tools/schematic-hierarchy.ts`_
 
 ---
 
+## Schematic Buses (9 tools)
+
+_Source: `src/tools/schematic-bus.ts`_
+
+| Tool                         | Description                                                                              | Discovery       |
+| ---------------------------- | ---------------------------------------------------------------------------------------- | --------------- |
+| `add_schematic_bus`          | Draw a bus through two or more waypoints.                                                | `schematic_bus` |
+| `delete_schematic_bus`       | Delete one bus segment by its start and end coordinates (either order).                  | `schematic_bus` |
+| `add_schematic_bus_entry`    | Add a 45 degree bus entry.                                                               | `schematic_bus` |
+| `delete_schematic_bus_entry` | Delete the bus entry whose bus end is within 0.5 mm of a position.                       | `schematic_bus` |
+| `list_schematic_buses`       | Report the buses on one sheet.                                                           | `schematic_bus` |
+| `connect_pins_to_bus`        | Connect symbol pins to an existing bus in one call.                                      | `schematic_bus` |
+| `list_bus_aliases`           | List the bus aliases stored in the project file (KiCad 9+ keeps them in the .kicad_pro). | `schematic_bus` |
+| `set_bus_alias`              | Create or replace a bus alias in the project file.                                       | `schematic_bus` |
+| `delete_bus_alias`           | Delete a bus alias from the project file.                                                | `schematic_bus` |
+
+---
+
 ## Schematic Layout and Cosmetics (5 tools)
 
 _Source: `src/tools/schematic-layout.ts`_
@@ -512,6 +530,7 @@ _Source: `src/tools/gui-driver.ts`_
 | `schematic.ts`           | Schematic                              | 46      |
 | `schematic-batch.ts`     | Schematic Batch Operations             | 9       |
 | `schematic-hierarchy.ts` | Hierarchical Sheets                    | 5       |
+| `schematic-bus.ts`       | Schematic Buses                        | 9       |
 | `schematic-layout.ts`    | Schematic Layout and Cosmetics         | 5       |
 | `validation.ts`          | File Validation                        | 2       |
 | `library.ts`             | Footprint Libraries and Library Tables | 7       |
@@ -528,11 +547,11 @@ _Source: `src/tools/gui-driver.ts`_
 | `router.ts`              | Tool Discovery                         | 3       |
 | `digikey-api.ts`         | digikey-api.ts                         | 3       |
 | `gui-driver.ts`          | gui-driver.ts                          | 11      |
-| **Total**                |                                        | **244** |
+| **Total**                |                                        | **253** |
 
 ## Summary by discovery category
 
-These are the categories `search_tools` searches. They cover 184 of the 244 registered tools.
+These are the categories `search_tools` searches. They cover 193 of the 253 registered tools.
 
 | Category                   | Tools indexed |
 | -------------------------- | ------------- |
@@ -545,6 +564,7 @@ These are the categories `search_tools` searches. They cover 184 of the 244 regi
 | `symbol_library`           | 17            |
 | `symbol_pins`              | 3             |
 | `schematic_hierarchy`      | 5             |
+| `schematic_bus`            | 9             |
 | `schematic_layout`         | 5             |
 | `schematic_batch`          | 6             |
 | `routing`                  | 3             |
@@ -553,6 +573,6 @@ These are the categories `search_tools` searches. They cover 184 of the 244 regi
 | `parts-registry`           | 3             |
 | `digikey`                  | 3             |
 | `gui-driver`               | 11            |
-| **Indexed total**          | **184**       |
+| **Indexed total**          | **193**       |
 | Registered but not indexed | 60            |
-| **Registered total**       | **244**       |
+| **Registered total**       | **253**       |

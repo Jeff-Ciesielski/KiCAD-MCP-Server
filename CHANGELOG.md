@@ -4,6 +4,58 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New Features
+
+- **Schematic buses.** Nine tools in a new `schematic_bus` category draw and
+  delete buses and bus entries, connect a run of pins to a bus in one call
+  (`connect_pins_to_bus` adds an entry, a wire and a member label per pin),
+  report each sheet's bus networks with their members and wiring problems
+  (`list_schematic_buses`), and manage bus aliases in the project file, where
+  KiCad 9 and 10 keep them. The existing net tools now understand buses. A bus
+  label such as `D[0..7]` or `I2C{SDA SCL}` is no longer listed as a net with
+  no pins, or reported as a floating label while it sits on a bus. Its
+  members are listed instead. `get_net_connections` given a bus label lists
+  the pins of each member, and `get_net_at_point` on a bus returns the bus and
+  its members. The rules were checked case by case against `kicad-cli` 10.0.6
+  netlists; [Schematic Buses](docs/SCHEMATIC_BUSES.md) has the cases and their
+  results.
+- **Hierarchical nets come from KiCad's netlist.** `list_schematic_nets`,
+  `get_net_connections` and `sync_schematic_to_board` matched nets across
+  sheets by label name, so a sheet pin `SDA` wired to the parent's `I2C_SDA`
+  left two nets, and every sub-sheet's local `EN` was one net. They now take
+  the design's nets from `kicad-cli sch export netlist`: sheet pins, bus sheet
+  pins, global labels and reused sheets follow KiCad exactly. A net can be
+  asked for by any label on it or by KiCad's name; each listed net shows the
+  labels on it, and a label used on several separate nets returns all of them
+  with a warning. Without kicad-cli the tools match label names as before and
+  say so in `warnings`.
+  **Board net names change** to KiCad's: a local label `SDA` on the root
+  sheet becomes the board net `/SDA`, a sub-sheet's becomes `/child/SDA`, and
+  a pin wired to nothing gets KiCad's `unconnected-(R1-Pad2)` net. These are
+  the names KiCad's own F8 gives. A board synced by an earlier version keeps
+  its old net names on tracks and zones, so re-run DRC after the first sync.
+
+### Bug Fixes
+
+- **A junction where a wire ends on the middle of another wire was deleted.**
+  Every wire edit resynced junctions by counting wire ends and pins only, so
+  a T whose long wire was not split counted two connections and lost its
+  junction. KiCad joins that T only through the junction, so the branch fell
+  off its net. Bus junctions were deleted the same way. Junctions are now kept
+  at such a T, wires and buses are checked separately, and sheet pins count as
+  connections. Junctions that KiCad needs at a crossing, on a 45 degree wire,
+  and where a pin sits on the middle of a wire are kept as well; before, any
+  wire edit or symbol move removed them.
+- **Junctions were never added on a sub-sheet.** Junction sync gave up when
+  the sheet had no `(sheet_instances)` block, which only the root sheet has.
+- **`sync_schematic_to_board` failed on a sub-sheet with exactly one
+  hierarchical label.** kicad-skip returns that label itself rather than a
+  list, and the label loop raised `TypeError`.
+- **`sync_schematic_to_board` ignored a label in the middle of a wire.** Only
+  labels on a wire end named the wire, so pins on a wire labelled mid-way
+  reached the board with no net.
+- **`find_orphaned_wires` reported a wire ending on a bus entry as dangling.**
+
 ### Tooling
 
 - **Release runs for the same tag no longer race.** Pushing the v2.8.2 tag
