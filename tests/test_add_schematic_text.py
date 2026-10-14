@@ -111,8 +111,10 @@ class TestWireManagerAddText:
 
         WireManager.add_text(sch, "Centered", [50.0, 50.0], justify="center")
 
+        # KiCad has no center token; (justify center ...) fails to load.
         content = sch.read_text(encoding="utf-8")
-        assert "(justify center bottom)" in content
+        assert "(justify bottom)" in content
+        assert "center" not in content
 
     def test_custom_font_size(self, tmp_path):
         from commands.wire_manager import WireManager

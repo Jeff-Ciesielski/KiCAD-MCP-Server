@@ -5,9 +5,9 @@
      in this file are preserved, so improving the wording here is safe. -->
 
 **Version:** 2.8.2
-**Tools registered on the server:** 253
-**Tools indexed for keyword discovery:** 193 in 18 categories
-**Last updated:** 2026-10-13
+**Tools registered on the server:** 258
+**Tools indexed for keyword discovery:** 198 in 18 categories
+**Last updated:** 2026-10-14
 
 ## How to read this document
 
@@ -299,6 +299,20 @@ _Source: `src/tools/schematic-bus.ts`_
 
 ---
 
+## Schematic Text Notes and Junctions (5 tools)
+
+_Source: `src/tools/schematic-markup.ts`_
+
+| Tool                        | Description                                                                                                                       | Discovery   |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `edit_schematic_text`       | Change one text note (a (text) or (text_box) item) in place: its text, position, angle, font size, bold, italic or justification. | `schematic` |
+| `delete_schematic_text`     | Delete one text note (a (text) or (text_box) item).                                                                               | `schematic` |
+| `list_schematic_junctions`  | List the junctions on one sheet.                                                                                                  | `schematic` |
+| `add_schematic_junction`    | Add a junction at a point.                                                                                                        | `schematic` |
+| `delete_schematic_junction` | Delete the junction nearest a point, within 0.5 mm.                                                                               | `schematic` |
+
+---
+
 ## Schematic Layout and Cosmetics (5 tools)
 
 _Source: `src/tools/schematic-layout.ts`_
@@ -531,6 +545,7 @@ _Source: `src/tools/gui-driver.ts`_
 | `schematic-batch.ts`     | Schematic Batch Operations             | 9       |
 | `schematic-hierarchy.ts` | Hierarchical Sheets                    | 5       |
 | `schematic-bus.ts`       | Schematic Buses                        | 9       |
+| `schematic-markup.ts`    | Schematic Text Notes and Junctions     | 5       |
 | `schematic-layout.ts`    | Schematic Layout and Cosmetics         | 5       |
 | `validation.ts`          | File Validation                        | 2       |
 | `library.ts`             | Footprint Libraries and Library Tables | 7       |
@@ -547,11 +562,11 @@ _Source: `src/tools/gui-driver.ts`_
 | `router.ts`              | Tool Discovery                         | 3       |
 | `digikey-api.ts`         | digikey-api.ts                         | 3       |
 | `gui-driver.ts`          | gui-driver.ts                          | 11      |
-| **Total**                |                                        | **253** |
+| **Total**                |                                        | **258** |
 
 ## Summary by discovery category
 
-These are the categories `search_tools` searches. They cover 193 of the 253 registered tools.
+These are the categories `search_tools` searches. They cover 198 of the 258 registered tools.
 
 | Category                   | Tools indexed |
 | -------------------------- | ------------- |
@@ -559,7 +574,7 @@ These are the categories `search_tools` searches. They cover 193 of the 253 regi
 | `component`                | 15            |
 | `export`                   | 27            |
 | `drc`                      | 7             |
-| `schematic`                | 26            |
+| `schematic`                | 31            |
 | `library`                  | 7             |
 | `symbol_library`           | 17            |
 | `symbol_pins`              | 3             |
@@ -573,6 +588,6 @@ These are the categories `search_tools` searches. They cover 193 of the 253 regi
 | `parts-registry`           | 3             |
 | `digikey`                  | 3             |
 | `gui-driver`               | 11            |
-| **Indexed total**          | **193**       |
+| **Indexed total**          | **198**       |
 | Registered but not indexed | 60            |
-| **Registered total**       | **253**       |
+| **Registered total**       | **258**       |

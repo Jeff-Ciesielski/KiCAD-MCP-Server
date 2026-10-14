@@ -12,10 +12,13 @@ import re
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from collections import Counter
+from typing import Any, Callable, List, NamedTuple, Optional, Tuple
 
 import sexpdata
 from sexpdata import Symbol
+from commands.schematic_text import justify_tokens
+from commands.schematic_text import list_texts as text_notes
 from utils.sexpr_format import dumps as kicad_dumps
 from utils.sexpr_format import escape_sexpr_string
 
@@ -46,6 +49,18 @@ _SYM_PIN = Symbol("pin")
 _SYM_SYMBOL = Symbol("symbol")
 _SYM_UNIT = Symbol("unit")
 _IU_PER_MM = 10000
+
+
+def _iu(pt: Tuple[float, float]) -> Tuple[int, int]:
+    return (round(pt[0] * _IU_PER_MM), round(pt[1] * _IU_PER_MM))
+
+
+class PointConnections(NamedTuple):
+    """Connections at one point: wire and bus counts, and how many segments end there."""
+
+    wires: int
+    buses: int
+    segment_ends: int
 
 
 def _find_insertion_point(content: str) -> int:
@@ -683,32 +698,23 @@ class WireManager:
         return positions
 
     @staticmethod
-    def _junction_points(
+    def _connections(
         segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
         anchors: List[Tuple[float, float]],
-        existing: set,
-    ) -> Tuple[set, set]:
-        """Junction points for segments of one kind: (points to add, existing points to keep).
+    ) -> Tuple[Callable[[Tuple[int, int]], int], "Counter[Tuple[int, int]]"]:
+        """Count connections at points, for segments of one kind.
 
-        Each point counts its connections: one per segment end and per pin or
-        sheet pin there, and two per segment passing through it. KiCad only
-        joins a segment's middle through a junction, so a junction with three
-        or more connections is load-bearing: at a T, at a crossing someone
-        joined, or where a pin sits on a wire's middle. One is added only
-        where a segment ends and three or more connections meet, as KiCad does
-        when a wire is drawn; a plain crossing stays unjoined.
+        Returns a function from a point in IU to its connection count, and
+        the count of segment ends at each point. A point counts one
+        connection per segment end and per pin or sheet pin there, and two
+        per segment passing through it.
         """
-        from collections import Counter
-
-        def iu(pt: Tuple[float, float]) -> Tuple[int, int]:
-            return (round(pt[0] * _IU_PER_MM), round(pt[1] * _IU_PER_MM))
-
         ends: Counter = Counter()
         rows: dict = {}
         cols: dict = {}
         slanted: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
         for a, b in segments:
-            (ax, ay), (bx, by) = iu(a), iu(b)
+            (ax, ay), (bx, by) = _iu(a), _iu(b)
             ends[(ax, ay)] += 1
             ends[(bx, by)] += 1
             if ay == by and ax != bx:
@@ -717,7 +723,7 @@ class WireManager:
                 cols.setdefault(ax, []).append((min(ay, by), max(ay, by)))
             elif (ax, ay) != (bx, by):
                 slanted.append(((ax, ay), (bx, by)))
-        anchor_count: Counter = Counter(iu(pt) for pt in anchors)
+        anchor_count: Counter = Counter(_iu(pt) for pt in anchors)
 
         def passes(x: int, y: int) -> int:
             count = sum(1 for lo, hi in rows.get(y, ()) if lo < x < hi)
@@ -735,9 +741,62 @@ class WireManager:
         def connections(pt: Tuple[int, int]) -> int:
             return ends.get(pt, 0) + anchor_count.get(pt, 0) + 2 * passes(*pt)
 
+        return connections, ends
+
+    @staticmethod
+    def _junction_points(
+        segments: List[Tuple[Tuple[float, float], Tuple[float, float]]],
+        anchors: List[Tuple[float, float]],
+        existing: set,
+    ) -> Tuple[set, set]:
+        """Junction points for segments of one kind: (points to add, existing points to keep).
+
+        KiCad only joins a segment's middle through a junction, so a junction
+        with three or more connections (see _connections) is load-bearing: at
+        a T, at a crossing someone joined, or where a pin sits on a wire's
+        middle. One is added only where a segment ends and three or more
+        connections meet, as KiCad does when a wire is drawn; a plain
+        crossing stays unjoined.
+        """
+        connections, ends = WireManager._connections(segments, anchors)
         add = {pt for pt in ends if connections(pt) >= 3}
         keep = {pt for pt in existing if connections(pt) >= 3}
         return add, keep
+
+    @staticmethod
+    def _segments(sch_data: list, kind: Symbol) -> list:
+        found = []
+        for item in sch_data:
+            parsed = WireManager._parse_wire(item, kind)
+            if parsed is not None:
+                found.append((parsed[0], parsed[1]))
+        return found
+
+    @staticmethod
+    def point_connections(sch_data: list) -> Callable[[Tuple[float, float]], PointConnections]:
+        """Return a function giving the wire and bus connections at a point in mm.
+
+        Uses the same counts as sync_junctions: pins and sheet pins count for
+        wires, sheet pins for buses.
+        """
+        sheet_pins = WireManager._collect_sheet_pin_positions(sch_data)
+        wire_count, wire_ends = WireManager._connections(
+            WireManager._segments(sch_data, _SYM_WIRE),
+            WireManager._collect_pin_positions(sch_data) + sheet_pins,
+        )
+        bus_count, bus_ends = WireManager._connections(
+            WireManager._segments(sch_data, _SYM_BUS), sheet_pins
+        )
+
+        def at(point: Tuple[float, float]) -> PointConnections:
+            pt = _iu(point)
+            return PointConnections(
+                wires=wire_count(pt),
+                buses=bus_count(pt),
+                segment_ends=wire_ends.get(pt, 0) + bus_ends.get(pt, 0),
+            )
+
+        return at
 
     @staticmethod
     def sync_junctions(sch_data: list) -> Tuple[int, int]:
@@ -750,25 +809,16 @@ class WireManager:
 
         Returns (added_count, removed_count).
         """
-
-        def segments(kind: Symbol) -> list:
-            found = []
-            for item in sch_data:
-                parsed = WireManager._parse_wire(item, kind)
-                if parsed is not None:
-                    found.append((parsed[0], parsed[1]))
-            return found
-
         existing = WireManager._get_existing_junctions(sch_data)
         existing_iu = set(existing.keys())
         sheet_pins = WireManager._collect_sheet_pin_positions(sch_data)
         wire_add, wire_keep = WireManager._junction_points(
-            segments(_SYM_WIRE),
+            WireManager._segments(sch_data, _SYM_WIRE),
             WireManager._collect_pin_positions(sch_data) + sheet_pins,
             existing_iu,
         )
         bus_add, bus_keep = WireManager._junction_points(
-            segments(_SYM_BUS), sheet_pins, existing_iu
+            WireManager._segments(sch_data, _SYM_BUS), sheet_pins, existing_iu
         )
         needed_iu = wire_add | bus_add
         kept_iu = wire_keep | bus_keep | needed_iu
@@ -1141,77 +1191,15 @@ class WireManager:
 
     @staticmethod
     def list_texts(schematic_path: Path) -> Optional[List[Any]]:
-        """Return all free-form text annotations (SCH_TEXT) in a schematic.
+        """Return the text notes, (text ...) and (text_box ...), in a schematic.
 
-        Each entry is a dict with keys: text, position (x/y), angle,
-        font_size, bold, italic, justify, uuid.
+        Each entry is a dict with keys: kind, text, position (x/y), angle,
+        font_size, bold, italic, justify, uuid, and size for a text box.
         Returns None on parse error.
         """
         try:
             with open(schematic_path, "r", encoding="utf-8") as f:
-                sch_data = sexpdata.loads(f.read())
-
-            _SYM_TEXT = Symbol("text")
-            _SYM_EFFECTS = Symbol("effects")
-            _SYM_FONT = Symbol("font")
-            _SYM_SIZE = Symbol("size")
-            _SYM_JUSTIFY = Symbol("justify")
-            _SYM_BOLD = Symbol("bold")
-            _SYM_ITALIC = Symbol("italic")
-
-            results = []
-            for item in sch_data:
-                if not (isinstance(item, list) and len(item) >= 2 and item[0] == _SYM_TEXT):
-                    continue
-                # item[1] is the text string
-                text_val = item[1] if len(item) > 1 else ""
-
-                pos_x = pos_y = angle = 0.0
-                font_size = 1.27
-                bold = italic = False
-                justify = "left"
-                uid = ""
-
-                for part in item[2:]:
-                    if not isinstance(part, list) or not part:
-                        continue
-                    tag = part[0]
-                    if tag == _SYM_AT and len(part) >= 3:
-                        pos_x = float(part[1])
-                        pos_y = float(part[2])
-                        angle = float(part[3]) if len(part) >= 4 else 0.0
-                    elif tag == _SYM_UUID and len(part) >= 2:
-                        uid = str(part[1])
-                    elif tag == _SYM_EFFECTS:
-                        for eff in part[1:]:
-                            if not isinstance(eff, list) or not eff:
-                                continue
-                            if eff[0] == _SYM_FONT:
-                                for fp in eff[1:]:
-                                    if not isinstance(fp, list) or not fp:
-                                        continue
-                                    if fp[0] == _SYM_SIZE and len(fp) >= 2:
-                                        font_size = float(fp[1])
-                                    elif fp[0] == _SYM_BOLD and len(fp) >= 2:
-                                        bold = str(fp[1]).lower() == "yes"
-                                    elif fp[0] == _SYM_ITALIC and len(fp) >= 2:
-                                        italic = str(fp[1]).lower() == "yes"
-                            elif eff[0] == _SYM_JUSTIFY and len(eff) >= 2:
-                                justify = str(eff[1])
-
-                results.append(
-                    {
-                        "text": text_val,
-                        "position": {"x": pos_x, "y": pos_y},
-                        "angle": angle,
-                        "font_size": font_size,
-                        "bold": bold,
-                        "italic": italic,
-                        "justify": justify,
-                        "uuid": uid,
-                    }
-                )
-            return results
+                return text_notes(sexpdata.loads(f.read()))
         except Exception as e:
             logger.error(f"Error listing texts: {e}")
             import traceback
@@ -1248,7 +1236,7 @@ class WireManager:
                 f"\t\t(effects\n"
                 f"\t\t\t(font{font_attrs}\n"
                 f"\t\t\t)\n"
-                f"\t\t\t(justify {justify} bottom)\n"
+                f"\t\t\t(justify {' '.join(map(str, justify_tokens(justify)))})\n"
                 f"\t\t)\n"
                 f'\t\t(uuid "{uid}")\n'
                 f"\t)\n"

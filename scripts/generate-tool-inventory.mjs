@@ -58,6 +58,7 @@ const SECTIONS = [
   ["schematic-batch.ts", "Schematic Batch Operations"],
   ["schematic-hierarchy.ts", "Hierarchical Sheets"],
   ["schematic-bus.ts", "Schematic Buses"],
+  ["schematic-markup.ts", "Schematic Text Notes and Junctions"],
   ["schematic-layout.ts", "Schematic Layout and Cosmetics"],
   ["validation.ts", "File Validation"],
   ["library.ts", "Footprint Libraries and Library Tables"],

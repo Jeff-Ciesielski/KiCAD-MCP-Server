@@ -32,6 +32,7 @@ import sexpdata
 from annotations import AnnotationLoader
 from commands.schematic_bus_handlers import SchematicBusHandlersMixin
 from commands.schematic_handlers import SchematicHandlersMixin
+from commands.schematic_markup_handlers import SchematicMarkupHandlersMixin
 from commands.wire_manager import WireManager
 from resources.resource_definitions import RESOURCE_DEFINITIONS, handle_resource_read
 
@@ -441,7 +442,9 @@ except ImportError as e:
     sys.exit(1)
 
 
-class KiCADInterface(SchematicHandlersMixin, SchematicBusHandlersMixin):
+class KiCADInterface(
+    SchematicHandlersMixin, SchematicBusHandlersMixin, SchematicMarkupHandlersMixin
+):
     """Main interface class to handle KiCAD operations"""
 
     def __init__(self) -> None:
@@ -765,6 +768,11 @@ class KiCADInterface(SchematicHandlersMixin, SchematicBusHandlersMixin):
             "add_schematic_hierarchical_label": self._handle_add_schematic_hierarchical_label,
             "add_schematic_text": self._handle_add_schematic_text,
             "list_schematic_texts": self._handle_list_schematic_texts,
+            "edit_schematic_text": self._handle_edit_schematic_text,
+            "delete_schematic_text": self._handle_delete_schematic_text,
+            "list_schematic_junctions": self._handle_list_schematic_junctions,
+            "add_schematic_junction": self._handle_add_schematic_junction,
+            "delete_schematic_junction": self._handle_delete_schematic_junction,
             "add_sheet_pin": self._handle_add_sheet_pin,
             "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands

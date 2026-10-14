@@ -53,15 +53,16 @@ Use this tool to:
 - add, update, or remove **arbitrary custom properties** used by BOM and sourcing
   workflows (`MPN`, `Manufacturer`, `Manufacturer_PN`, `Distributor`, `DigiKey`,
   `DigiKey_PN`, `Mouser_PN`, `LCSC`, `JLCPCB_PN`, `Voltage`, `Tolerance`, `Power`,
-  `Dielectric`, `Temperature_Coefficient`, …).
+  `Dielectric`, `Temperature_Coefficient`, …),
+- mark the part Do Not Populate, or clear the mark (`dnp`).
 
 Custom properties are first-class — they survive ERC, are exported by
 `export_bom`, and are picked up by the JLCPCB / Digi-Key sourcing tooling. Newly
 created properties default to hidden so they do not clutter the schematic canvas.
 
 Multiple updates can be batched in a single call: pass any combination of
-`footprint`, `value`, `newReference`, `fieldPositions`, `properties`, and
-`removeProperties` together. This is more efficient than delete + re-add because
+`footprint`, `value`, `newReference`, `fieldPositions`, `properties`,
+`removeProperties`, and `dnp` together. This is more efficient than delete + re-add because
 it preserves the component's position and UUID. Operates on .kicad_sch files
 only — to modify a PCB footprint use `edit_component` instead.
 
@@ -75,6 +76,7 @@ only — to modify a PCB footprint use `edit_component` instead.
 | fieldPositions   | object   | No       | Reposition field labels: map of field name to {x, y, angle} (e.g. {"Reference": {"x": 12.5, "y": 17.0}})                                                                                                                                                         |
 | properties       | object   | No       | Add or update component properties. Map of property name to either a string value or `{value, x?, y?, angle?, hide?, fontSize?}`. Built-in fields (Reference/Value/Footprint/Datasheet) can also be set this way but the dedicated parameters above are clearer. |
 | removeProperties | string[] | No       | List of custom property names to delete. Built-in fields (Reference, Value, Footprint, Datasheet) cannot be removed (clear them by setting `value` to `""` instead).                                                                                             |
+| dnp              | boolean  | No       | Do Not Populate: `true` marks the part DNP, `false` clears it. Set on every unit of a multi-unit part.                                                                                                                                                           |
 
 **Example — attach BOM/sourcing data to a 0603 resistor:**
 
@@ -492,7 +494,7 @@ project file when it opens the project.
 | name          | string | set/delete | Alias name, one word                              |
 | members       | array  | set        | Member names or vectors, e.g. `["D[0..7]", "WE"]` |
 
-## Text Annotations (2 tools)
+## Text Annotations (4 tools)
 
 ### add_schematic_text
 
@@ -520,16 +522,108 @@ List all free-form text annotations in the schematic. Optionally filter by a sub
 
 **Response fields (per text entry):**
 
-| Field     | Description                         |
-| --------- | ----------------------------------- |
-| text      | Text string content                 |
-| position  | `{"x": float, "y": float}` in mm    |
-| angle     | Rotation angle in degrees           |
-| font_size | Font size in mm                     |
-| bold      | `true` / `false`                    |
-| italic    | `true` / `false`                    |
-| justify   | `"left"` \| `"center"` \| `"right"` |
-| uuid      | KiCad UUID of the element           |
+| Field     | Description                           |
+| --------- | ------------------------------------- |
+| text      | Text string content                   |
+| position  | `{"x": float, "y": float}` in mm      |
+| angle     | Rotation angle in degrees             |
+| font_size | Font size in mm                       |
+| bold      | `true` / `false`                      |
+| italic    | `true` / `false`                      |
+| justify   | `"left"` \| `"center"` \| `"right"`   |
+| uuid      | KiCad UUID of the element             |
+| kind      | `text`, or `text_box` for a box       |
+| size      | Box `{"width", "height"}`, boxes only |
+
+Text boxes are listed with plain text notes.
+
+### edit_schematic_text
+
+Change one text note in place: its text, position, angle, font size, bold,
+italic or horizontal justification. Fields left out are kept, and so is the
+note's uuid. Works on text boxes too; a box keeps its size when it moves.
+Returns the note before and after the edit.
+
+| Parameter     | Type    | Required | Description                                             |
+| ------------- | ------- | -------- | ------------------------------------------------------- |
+| schematicPath | string  | Yes      | Path to the .kicad_sch file                             |
+| uuid          | string  | One of   | uuid of the note, from `list_schematic_texts`           |
+| position      | {x, y}  | One of   | Current position; picks the nearest note within 0.5 mm  |
+| text          | string  | No       | New text; line breaks are kept                          |
+| newPosition   | {x, y}  | No       | Move the note here                                      |
+| angle         | number  | No       | Rotation in degrees                                     |
+| fontSize      | number  | No       | Font size in mm                                         |
+| bold          | boolean | No       | Bold on or off                                          |
+| italic        | boolean | No       | Italic on or off                                        |
+| justify       | string  | No       | `left` \| `center` \| `right`; the vertical one is kept |
+
+When two notes sit at the same position, `position` is refused and the uuid
+is needed.
+
+KiCad has no `center` justify token. A centred note leaves the horizontal
+token out: `(justify bottom)`, not `(justify center bottom)`. KiCad 10.0.6
+refuses to open a sheet that has the second form.
+
+### delete_schematic_text
+
+Delete one text note or text box, picked by `uuid` or by `position` as in
+`edit_schematic_text`. Returns the deleted note.
+
+## Junctions (3 tools)
+
+A junction joins the wires, or the buses, that meet at its point. KiCad joins
+a wire end to the middle of another wire only through a junction. Two wires
+that cross are not joined unless a junction sits on the crossing.
+
+The tools count connections at a point the same way the automatic junction
+sync does. Each wire end and each pin or sheet pin counts one; a wire that
+passes through the point counts two. Wires and buses are counted apart. A
+junction joins something only where 3 or more connections meet:
+
+```
+  T: 3              crossing: 4         corner: 2          end on pin: 2
+  ────●────         ────●────           ────┐              ────[R1]
+      │                 │                   │
+                        │
+```
+
+The wire tools add a junction where a new wire ends on another wire, and
+remove junctions that no longer join anything. Use these tools for a
+crossing that must join, or to put back a junction that was lost.
+
+### list_schematic_junctions
+
+List the junctions on one sheet. Each entry has `position`, `uuid`,
+`wireConnections`, `busConnections`, and `joinsAnything`, which is false for a
+junction with fewer than 3 connections.
+
+| Parameter     | Type   | Required | Description                 |
+| ------------- | ------ | -------- | --------------------------- |
+| schematicPath | string | Yes      | Path to the .kicad_sch file |
+
+### add_schematic_junction
+
+Add a junction at a point. A point with fewer than 3 wire or bus connections
+is refused, and so is a point that already has a junction. The position must
+lie exactly on the wires.
+
+| Parameter     | Type   | Required | Description                 |
+| ------------- | ------ | -------- | --------------------------- |
+| schematicPath | string | Yes      | Path to the .kicad_sch file |
+| position      | {x, y} | Yes      | Junction position in mm     |
+
+### delete_schematic_junction
+
+Delete the junction nearest a point, within 0.5 mm. At a crossing, the wires
+are then no longer joined. Where a wire ends at the point and 3 or more
+connections still meet, the result carries a `warning`. KiCad, and the wire
+tools here, add a junction back at such a point on the next wire edit. To
+break that connection, move or delete the wire.
+
+| Parameter     | Type   | Required | Description                 |
+| ------------- | ------ | -------- | --------------------------- |
+| schematicPath | string | Yes      | Path to the .kicad_sch file |
+| position      | {x, y} | Yes      | Junction position in mm     |
 
 ## Schematic Creation and Export (6 tools)
 

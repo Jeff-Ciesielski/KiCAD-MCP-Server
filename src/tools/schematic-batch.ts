@@ -55,7 +55,7 @@ export function registerSchematicBatchTools(server: McpServer, callKicadScript: 
   // Edit many components at once
   server.tool(
     "batch_edit_schematic_components",
-    "Edit multiple existing components in one call. 'components' is a map {reference: {value?, footprint?, newReference?, ...}}; each entry is applied via the single-component editor. Returns per-reference updated/errors.",
+    "Edit multiple existing components in one call. 'components' is a map {reference: {value?, footprint?, newReference?, dnp?, ...}}; each entry takes the fields of edit_schematic_component and is applied through it. Returns per-reference updated/errors.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
       components: z

@@ -143,6 +143,11 @@ export const toolCategories: ToolCategory[] = [
       "export_schematic_pdf",
       "add_schematic_text",
       "list_schematic_texts",
+      "edit_schematic_text",
+      "delete_schematic_text",
+      "list_schematic_junctions",
+      "add_schematic_junction",
+      "delete_schematic_junction",
     ],
   },
   {

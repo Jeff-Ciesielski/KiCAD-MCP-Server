@@ -91,11 +91,6 @@ class TestSchemas:
             "add_schematic_connection" not in self.tools
         ), "add_schematic_connection must not appear in SCHEMATIC_TOOLS"
 
-    def test_add_schematic_junction_removed(self) -> None:
-        assert (
-            "add_schematic_junction" not in self.tools
-        ), "add_schematic_junction was removed; junctions are now managed automatically"
-
 
 # ---------------------------------------------------------------------------
 # 2. Handler dispatch tests
@@ -134,11 +129,6 @@ class TestHandlerDispatch:
 
         # Just verify the class has the handler method
         assert hasattr(KiCADInterface, "_handle_add_schematic_wire")
-
-    def test_add_schematic_junction_handler_removed(self) -> None:
-        from kicad_interface import KiCADInterface
-
-        assert not hasattr(KiCADInterface, "_handle_add_schematic_junction")
 
     def test_add_schematic_connection_not_present(self) -> None:
         from kicad_interface import KiCADInterface

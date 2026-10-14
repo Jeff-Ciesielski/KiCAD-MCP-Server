@@ -24,6 +24,7 @@ import pcbnew
 import sexpdata
 from commands.library_schematic import LibraryManager as SchematicLibraryManager
 from commands.schematic import SchematicLoadError, SchematicManager
+from commands.symbol_dnp import set_dnp, symbol_dnp
 from commands.wire_manager import WireManager
 from utils.board_items import clone_footprint
 from utils.interactive_schematic import reload_kicad_schematic
@@ -712,11 +713,15 @@ class SchematicHandlersMixin:
             properties = params.get("properties")
             # list[str]: ["OldField"] — protected built-ins are rejected
             remove_properties = params.get("removeProperties")
+            # bool: Do Not Populate, set on every unit of the part
+            dnp = params.get("dnp")
 
             if not schematic_path:
                 return {"success": False, "message": "schematicPath is required"}
             if not reference:
                 return {"success": False, "message": "reference is required"}
+            if dnp is not None and not isinstance(dnp, bool):
+                return {"success": False, "message": "dnp must be true or false"}
             if not any(
                 [
                     new_footprint is not None,
@@ -725,13 +730,14 @@ class SchematicHandlersMixin:
                     field_positions is not None,
                     properties is not None,
                     remove_properties is not None,
+                    dnp is not None,
                 ]
             ):
                 return {
                     "success": False,
                     "message": (
                         "At least one of footprint, value, newReference, fieldPositions, "
-                        "properties, or removeProperties must be provided"
+                        "properties, removeProperties, or dnp must be provided"
                     ),
                 }
 
@@ -920,6 +926,13 @@ class SchematicHandlersMixin:
 
             content = content[:block_start] + block_text + content[block_end + 1 :]
 
+            dnp_units = 0
+            if dnp is not None:
+                # Other units of a renamed part still carry the old reference.
+                for ref in {reference, new_reference or reference}:
+                    content, units = set_dnp(content, ref, dnp)
+                    dnp_units += units
+
             with open(sch_file, "w", encoding="utf-8") as f:
                 f.write(content)
 
@@ -940,6 +953,9 @@ class SchematicHandlersMixin:
                 changes["propertiesUpdated"] = properties_updated
             if properties_removed:
                 changes["propertiesRemoved"] = properties_removed
+            if dnp is not None:
+                changes["dnp"] = dnp
+                changes["dnpUnits"] = dnp_units
 
             logger.info(f"Edited schematic component {reference}: {changes}")
             self._reload_kicad_schematic()
@@ -1121,6 +1137,7 @@ class SchematicHandlersMixin:
                 "success": True,
                 "reference": reference,
                 "position": comp_pos,
+                "dnp": bool(symbol_dnp(block_text)),
                 "fields": fields,
             }
 
@@ -1730,6 +1747,7 @@ class SchematicHandlersMixin:
                     "position": {"x": float(position[0]), "y": float(position[1])},
                     "rotation": float(position[2]) if len(position) > 2 else 0,
                     "uuid": str(uuid_val),
+                    "dnp": bool(symbol.dnp.value) if hasattr(symbol, "dnp") else False,
                 }
 
                 # Get pins if available

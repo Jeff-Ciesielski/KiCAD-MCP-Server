@@ -204,7 +204,8 @@ Use this tool to:
   • reposition field labels (Reference / Value text),
   • add, update, or remove ARBITRARY CUSTOM PROPERTIES used by BOM and sourcing
     workflows: MPN, Manufacturer, Manufacturer_PN, Distributor, DigiKey, DigiKey_PN,
-    Mouser_PN, LCSC, JLCPCB_PN, Voltage, Tolerance, Power, Dielectric, etc.
+    Mouser_PN, LCSC, JLCPCB_PN, Voltage, Tolerance, Power, Dielectric, etc.,
+  • mark the part Do Not Populate (dnp: true) or clear the mark (dnp: false).
 
 Custom properties are first-class — they survive ERC, are exported by export_bom,
 and are picked up by the JLCPCB / Digi-Key BOM tooling. Newly-added properties
@@ -212,7 +213,7 @@ default to hidden so they do not clutter the schematic canvas.
 
 Multiple updates can be batched in a single call: pass any combination of
 \`footprint\`, \`value\`, \`newReference\`, \`fieldPositions\`, \`properties\`,
-and \`removeProperties\` together.
+\`removeProperties\`, and \`dnp\` together.
 
 This is more efficient than delete + re-add because it preserves the component's
 position and UUID. Operates on .kicad_sch files only — to modify a PCB footprint
@@ -290,6 +291,14 @@ use edit_component instead.`,
             "Reference, Value, Footprint, and Datasheet cannot be removed (clear them by setting " +
             'value to "" instead). Example: ["OldMPN", "Distributor_PN"]',
         ),
+      dnp: z
+        .boolean()
+        .optional()
+        .describe(
+          "Do Not Populate: true marks the part DNP, false clears it. Set on every unit of a " +
+            "multi-unit part. The part stays in the netlist; the BOM and position files can " +
+            "leave it out, and the schematic draws it crossed out.",
+        ),
     },
     async (args: {
       schematicPath: string;
@@ -314,6 +323,7 @@ use edit_component instead.`,
           }
       >;
       removeProperties?: string[];
+      dnp?: boolean;
     }) => {
       // Normalise array-form justify (["left", "top"]) to the space-separated
       // string form ("left top") that the Python backend expects.
@@ -341,6 +351,8 @@ use edit_component instead.`,
           summaryParts.push(`updated=${Object.keys(updated.propertiesUpdated).join(",")}`);
         if (updated.propertiesRemoved)
           summaryParts.push(`removed=${updated.propertiesRemoved.join(",")}`);
+        if (updated.dnp !== undefined)
+          summaryParts.push(`dnp=${updated.dnp} (${updated.dnpUnits} unit(s))`);
         return {
           content: [
             {
@@ -528,7 +540,7 @@ edit_schematic_component and set its value to an empty string.`,
           content: [
             {
               type: "text",
-              text: `Component ${result.reference} at ${pos}\nFields:\n${fieldLines.join("\n")}`,
+              text: `Component ${result.reference} at ${pos}${result.dnp ? " DNP" : ""}\nFields:\n${fieldLines.join("\n")}`,
             },
           ],
         };
@@ -985,7 +997,7 @@ edit_schematic_component and set its value to an empty string.`,
         }
         const lines = comps.map(
           (c: any) =>
-            `  ${c.reference}: ${c.libId} = "${c.value}" at (${c.position.x}, ${c.position.y}) rot=${c.rotation}°${c.pins ? ` [${c.pins.length} pins]` : ""}`,
+            `  ${c.reference}: ${c.libId} = "${c.value}" at (${c.position.x}, ${c.position.y}) rot=${c.rotation}°${c.dnp ? " DNP" : ""}${c.pins ? ` [${c.pins.length} pins]` : ""}`,
         );
         return {
           content: [
@@ -2176,8 +2188,9 @@ edit_schematic_component and set its value to an empty string.`,
   // List free-form text annotations in schematic
   server.tool(
     "list_schematic_texts",
-    "List all free-form text annotations (notes, headings, documentation strings) in the schematic. " +
-      "Returns position, angle, font size, bold/italic flags, and justification for each text element. " +
+    "List all free-form text annotations (notes, headings, documentation strings) in the schematic, " +
+      "both plain text and text boxes. Returns position, angle, font size, bold/italic flags, " +
+      "justification, and the uuid that edit_schematic_text and delete_schematic_text take. " +
       "Optionally filter by a substring match on the text content.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
@@ -2197,12 +2210,13 @@ edit_schematic_component and set its value to an empty string.`,
         }
         const lines = texts.map(
           (t: any) =>
-            `  "${t.text}" at (${t.position.x}, ${t.position.y})` +
+            `  ${t.kind === "text_box" ? "text box " : ""}"${t.text}" at (${t.position.x}, ${t.position.y})` +
             (t.angle ? ` angle=${t.angle}` : "") +
             ` size=${t.font_size}` +
             (t.bold ? " bold" : "") +
             (t.italic ? " italic" : "") +
-            ` justify=${t.justify}`,
+            ` justify=${t.justify}` +
+            ` uuid=${t.uuid}`,
         );
         return {
           content: [

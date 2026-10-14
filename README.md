@@ -24,7 +24,7 @@ The [Model Context Protocol](https://modelcontextprotocol.io/) is an open standa
 **Key Capabilities:**
 
 - 244 tools registered, 184 of them indexed for keyword discovery
-- 193 tools across 18 categories with JSON Schema validation
+- 198 tools across 18 categories with JSON Schema validation
 - Keyword tool discovery via `search_tools` / `get_category_tools`
 - 23 dynamic resources exposing project state
 - Complete schematic workflow with 65 tools (authoring, batch edits, hierarchy, layout) and dynamic symbol loading (~10,000 symbols)
@@ -787,7 +787,7 @@ Complete schematic workflow with dynamic symbol loading (~10,000 symbols) and in
 
 - `add_schematic_component` - Place symbols from any KiCad library
 - `delete_schematic_component` - Remove component
-- `edit_schematic_component` - Edit footprint, value, reference, label positions, and **arbitrary custom properties** (MPN, Manufacturer, DigiKey_PN, LCSC, Voltage, Tolerance, Dielectric, …) in one batched call
+- `edit_schematic_component` - Edit footprint, value, reference, label positions, Do Not Populate, and **arbitrary custom properties** (MPN, Manufacturer, DigiKey_PN, LCSC, Voltage, Tolerance, Dielectric, …) in one batched call
 - `set_schematic_component_property` - Add or update a single custom property (BOM/sourcing field) on a component
 - `remove_schematic_component_property` - Delete a single custom property from a component
 - `get_schematic_component` - Inspect every field on a component (built-in + custom) including label positions
@@ -827,6 +827,11 @@ Complete schematic workflow with dynamic symbol loading (~10,000 symbols) and in
 - `connect_pins_to_bus` - Entry, wire and member label for a run of pins in one call
 - `list_schematic_buses` - Bus members, entries, sheet pins and wiring problems on a sheet
 - `list_bus_aliases` / `set_bus_alias` / `delete_bus_alias` - Bus aliases in the project file
+
+**Text notes and junctions:**
+
+- `add_schematic_text` / `edit_schematic_text` / `delete_schematic_text` / `list_schematic_texts` - Text notes and text boxes
+- `add_schematic_junction` / `delete_schematic_junction` / `list_schematic_junctions` - Junctions, with the connections each one joins
 
 **Batch, Hierarchy and Layout (19 more tools):**
 

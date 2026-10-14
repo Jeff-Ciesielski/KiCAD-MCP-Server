@@ -35,8 +35,23 @@ All notable changes to the KiCAD MCP Server project are documented here.
   the names KiCad's own F8 gives. A board synced by an earlier version keeps
   its old net names on tracks and zones, so re-run DRC after the first sync.
 
+- **Edit and delete text notes, set DNP, and place junctions by hand.**
+  `edit_schematic_text` changes a note's text, position, angle or style in
+  place and keeps its uuid; `delete_schematic_text` removes one. Both work on
+  text boxes, and `list_schematic_texts` now lists text boxes and gives each
+  note's uuid. `edit_schematic_component` takes `dnp` and sets it on every
+  unit of the part; `get_schematic_component` and `list_schematic_components`
+  report it. `add_schematic_junction`, `delete_schematic_junction` and
+  `list_schematic_junctions` handle a crossing that must join, or a junction
+  that was lost. A junction is refused where fewer than three connections
+  meet, since it would join nothing.
+
 ### Bug Fixes
 
+- **`add_schematic_text` with `justify: "center"` wrote a sheet KiCad cannot
+  open.** It wrote `(justify center bottom)`. KiCad has no `center` token, and
+  KiCad 10.0.6 refuses the whole file. A centred note now leaves the
+  horizontal token out, which is how KiCad writes it.
 - **A junction where a wire ends on the middle of another wire was deleted.**
   Every wire edit resynced junctions by counting wire ends and pins only, so
   a T whose long wire was not split counted two connections and lost its
